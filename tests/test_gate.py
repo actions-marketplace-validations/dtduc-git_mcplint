@@ -210,12 +210,24 @@ def test_vulnerable_gateway_flags_auth_bypass() -> None:
     with gateway("vulnerable") as target:
         result = run_gate(profile, target)
     flagged = {f.probe_id for f in result.findings}
-    assert {"GATE001", "GATE002", "GATE003", "GATE004", "GATE006", "GATE007"} <= flagged
+    assert {"GATE001", "GATE002", "GATE003", "GATE004", "GATE006", "GATE007", "GATE008"} <= flagged
     gate001 = next(f for f in result.findings if f.probe_id == "GATE001")
     assert gate001.severity.value == "critical"
     assert gate001.cve == "CVE-2026-59822"
     assert gate001.remediation
     assert "POST /mcp -> 200" in gate001.evidence
+
+
+def test_fabricated_session_id_is_flagged() -> None:
+    """A never-issued session id must not buy a tools/list on a hardened server."""
+    profile = load_profile("litellm")
+    with gateway("vulnerable") as target:
+        result = run_gate(profile, target)
+    gate008 = next(f for f in result.findings if f.probe_id == "GATE008")
+    assert gate008.severity.value == "high"
+    assert gate008.cve == "CVE-2026-52869"
+    assert gate008.owasp.startswith("MCP07")
+    assert any((entry["session"] or "").startswith("mcp-session-") for entry in SEEN)
 
 
 def test_mcp_session_id_is_carried_between_steps() -> None:

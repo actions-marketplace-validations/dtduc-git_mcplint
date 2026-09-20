@@ -110,6 +110,18 @@ authentication. It sends one small, read-only request per known failure class �
 derived from public CVEs and advisories — and checks that every one of them is
 denied.
 
+Why this exists, in numbers:
+
+- **CVE-2026-59822** (LiteLLM MCP auth bypass) is the **first MCP flaw on
+  CISA's Known Exploited Vulnerabilities catalog** (2026-09-02) — the "Bearer a"
+  one-character token was enough to open an MCP session, and it was chained to
+  command injection and cryptominers in the wild.
+- Wiz Research scanned 3,074 public LiteLLM instances: **9.6% accepted the
+  default master key `sk-1234` or required no authentication at all**.
+- A June 2026 audit found **66% of 8,235 registered MCP servers** return a
+  server-authored `instructions` blob; Censys counted **12,500+ MCP services
+  reachable from the internet** in April 2026.
+
 - **Read-only.** No tool calls, no state changes: the battery only asks
   "does this endpoint reject anonymous callers?".
 - **Loopback by default.** Anything that is not `localhost`/`127.0.0.1`
@@ -133,6 +145,7 @@ uvx mcplint-sec gate --json --fail-on high      # CI-friendly
 | GATE005 | high | CVE-2026-42271 | `/mcp-rest/test/connection` reachable without credentials |
 | GATE006 | high | — | MCP management API reachable without credentials |
 | GATE007 | medium | CVE-2026-49468 | Management route authenticates from a spoofed `Host` header |
+| GATE008 | high | CVE-2026-52869 | MCP `/mcp` served `tools/list` on a never-issued `Mcp-Session-Id` |
 
 Exit codes: `0` clean, `1` finding at `--fail-on` severity or above, `2`
 operational error (bad profile, unreachable target, non-loopback target

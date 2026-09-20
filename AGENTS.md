@@ -10,10 +10,13 @@ servers; no network unless `--online`.
 - PyPI: `mcplint-sec` (the command is `mcplint`)
 - Install: `uvx mcplint-sec scan`
 
-## Current state (2026-09-18)
+## Current state (2026-09-21)
 
-- **v0.3.5 — `mcplint gate` + authenticated checks.** Anonymous battery
-  (`gate_data/litellm.yaml`, 7 probes from CVE-2026-59822 ×2, -42271, -49468)
+- **v0.4.0 — `mcplint gate` + authenticated checks.** Anonymous battery
+  (`gate_data/litellm.yaml`, 8 probes from CVE-2026-59822 ×2, -42271, -49468,
+  -52869) — GATE008 (v0.4.0) sends a `tools/list` on a never-issued
+  `Mcp-Session-Id: mcp-session-<random>` to catch the session-confusion class
+  (CVE-2026-52869 upstream SDK; mcp-grafana CVE-2026-19516 chain).
   plus `gate --auth <expectations.yaml>`: with one *test* key (env-var only),
   verifies tool-list filtering (AUTH001/002/005), `x-mcp-servers` scoping
   (AUTH003) and one opt-in read probe against an object the user cannot access
@@ -32,6 +35,11 @@ servers; no network unless `--online`.
   erroring/overexposed/leaky-scope/leaky-read gateways).
 - First production run of the anonymous battery against a live gateway: clean
   (6/7 probes denied, `/sse` absent).
+- Demand signals for the gate, 2026-09: CVE-2026-59822 became the **first MCP
+  flaw on CISA KEV** (2026-09-02, actively exploited, chained to command
+  injection); Wiz scan of 3,074 public LiteLLM instances → 9.6% accepted the
+  default master key `sk-1234` or no auth; Censys: 12,500+ internet-facing MCP
+  services (April 2026). Blog: `blog/2026-09-21-gateway-auth-is-not-session-auth.md`.
 - Older: **v0.1.1 released** (see below). Publishing is automated around
   `release.yml` (trusted publishing): bump `src/mcplint/__init__.py`, commit,
   `git tag vX.Y.Z`, push.
