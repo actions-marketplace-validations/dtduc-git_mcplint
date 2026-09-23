@@ -368,7 +368,7 @@ def run_gate(
     target: str | None = None,
     *,
     allow_host: bool = False,
-    timeout: float = 5.0,
+    timeout: float = 15.0,
 ) -> GateResult:
     """Run every probe once against `target` and evaluate the denials."""
     normalized = normalize_target(target or profile.default_target)
@@ -643,7 +643,7 @@ def run_auth_gate(
     target: str | None = None,
     *,
     allow_host: bool = False,
-    timeout: float = 5.0,
+    timeout: float = 15.0,
 ) -> GateResult:
     """Verify what a single (test) key is allowed to see and reach. Read-only."""
     key = os.environ.get(expectations.key_env)

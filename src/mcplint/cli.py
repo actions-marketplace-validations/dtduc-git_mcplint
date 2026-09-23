@@ -286,7 +286,7 @@ def gate(
         "--allow-host",
         help="Confirm the target host is yours (required for anything not on loopback).",
     ),
-    timeout: float = typer.Option(5.0, "--timeout", help="Per-request timeout in seconds."),
+    timeout: float = typer.Option(15.0, "--timeout", help="Per-request timeout in seconds."),
     as_json: bool = typer.Option(False, "--json", help="Print results as JSON."),
     fail_on: str = typer.Option(
         "high",
