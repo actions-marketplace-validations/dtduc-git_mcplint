@@ -17,7 +17,7 @@ the ecosystem in 2026:
 | Disclosure | What was confused |
 | --- | --- |
 | [CVE-2026-59822](https://github.com/BerriAI/litellm/security/advisories/GHSA-7488-6r32-c95q) (LiteLLM, KEV) | failed key validation → empty identity = authenticated |
-| [CVE-2026-19516](https://github.com/grafana/mcp-grafana/security) + session spoofing (mcp-grafana, CVSS 9.1) | `Mcp-Session-Id` *format* check treated as caller identity, then SSRF to cloud metadata |
+| [CVE-2026-19516](https://grafana.com/security/security-advisories/cve-2026-19516/) (mcp-grafana, CVSS 9.1) | `Mcp-Session-Id` *format* check treated as caller identity, then SSRF to cloud metadata |
 | [CVE-2026-52869](https://github.com/modelcontextprotocol/python-sdk/security/advisories/GHSA-jpw9-pfvf-9f58) (MCP Python SDK) | HTTP transports routed requests to a session without checking the principal |
 
 A **session id is a state handle, not a credential**. When a server routes on
@@ -27,24 +27,34 @@ clean demonstration: the caller authenticated nothing, yet the request that
 reached Grafana carried the server's privileged token and was audit-logged as
 such.
 
-The exposure is not theoretical. Wiz Research scanned 3,074 publicly reachable
-LiteLLM instances and found **9.6% accepted the default master key `sk-1234` or
-required no authentication at all**. Censys counted **12,500+ internet-facing
-MCP services** in April 2026.
+The exposure is not theoretical. [Wiz
+Research](https://www.wiz.io/blog/off-guard-breaking-litellm-from-authentication-bypass-to-cloud-compromise)
+scanned 3,074 publicly reachable LiteLLM instances and found **9.6% accepted
+the default master key `sk-1234` or required no authentication at all**.
+[Censys](https://censys.com/blog/mcp-servers-on-the-internet/) counted
+**12,500+ internet-facing MCP services** in April 2026.
 
 ## What we added
 
 `mcplint gate` has been checking running gateways with a read-only probe
-battery since v0.3. It now covers the session-confusion class too:
+battery since v0.2.0. It now covers the session-confusion class too:
 
 ```
-GATE008  high  CVE-2026-52869  MCP /mcp served tools/list on a never-issued Mcp-Session-Id
+GATE008  high  CVE-2026-52869  MCP /mcp served tools on a never-issued Mcp-Session-Id
 ```
 
-GATE008 sends a single `tools/list` carrying a syntactically valid session id
-the server never issued — no `initialize`, no credential. A hardened server
-rejects it (401/403) or answers the same 404 it gives for an unknown session;
-a confused server hands over the tool inventory.
+GATE008 sends the same `tools/list` twice: first with no session header as a
+negative control, then with a syntactically valid session id the server never
+issued — no `initialize`, no credential. It only fires when the control request
+is denied *and* the forged-session request comes back with a real tool
+inventory: a hardened server rejects the control with 401/403 and then refuses
+the forged session too — a clean denial if it answers 401/403, an inconclusive
+note (never a finding) if it answers 404 or a JSON-RPC error — while a confused
+server denies the control but hands the tools to the forged session. A 2xx
+carrying only a JSON-RPC error or an empty tool list is not proof, and an
+endpoint that serves the control
+request too is a different finding (anonymous access), so GATE008 stays quiet
+and says why.
 
 ```bash
 uvx mcplint-sec gate                            # http://localhost:4000
@@ -52,11 +62,12 @@ uvx mcplint-sec gate https://gateway.internal   # + --allow-host
 uvx mcplint-sec gate --json --fail-on high      # CI-friendly
 ```
 
-Eight probes now, one per public failure class: fabricated bearer,
-unvalidated virtual key, anonymous callers, anonymous legacy SSE, unauthenticated
-admin/test endpoints, Host-header authentication, and session-id confusion.
-Every probe is read-only, loopback-only unless you pass `--allow-host`, and
-derived from a cited advisory in
+Eight probes now across six failure classes: failed key validation (GATE001
+and GATE002 — same CVE-2026-59822 class, two entry points), anonymous callers,
+anonymous legacy SSE, unauthenticated admin/test endpoints, Host-header
+authentication, and session-id confusion. Five of the eight cite a CVE or
+advisory; the other three are baseline hygiene checks. Every probe is
+read-only, loopback-only unless you pass `--allow-host`, and defined in
 [`src/mcplint/gate_data/`](../src/mcplint/gate_data) — editable YAML if your
 gateway has quirks.
 

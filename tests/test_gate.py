@@ -87,6 +87,29 @@ class _Handler(BaseHTTPRequestHandler):
             if self.mode == "erroring":
                 self._send(500, {"detail": "Internal Server Error"})
                 return
+            if self.mode == "session_500" and self.headers.get("Mcp-Session-Id"):
+                self._send(500, {"detail": "Internal Server Error"})
+                return
+            if self.mode in ("session_confused", "session_checked", "session_empty"):
+                session = self.headers.get("Mcp-Session-Id")
+                if not session:
+                    self._send(401)
+                    return
+                if self.mode == "session_checked" and session != "test-session-1":
+                    self._send(
+                        200,
+                        {
+                            "jsonrpc": "2.0",
+                            "id": 1,
+                            "error": {"code": -32001, "message": "Session not found"},
+                        },
+                    )
+                    return
+                tools = [] if self.mode == "session_empty" else [
+                    {"name": name} for name in TOOLS
+                ]
+                self._send(200, {"jsonrpc": "2.0", "id": 1, "result": {"tools": tools}})
+                return
             if not (self.mode in ("vulnerable", "redirect") or self._authed()):
                 self._send(401)
                 return
@@ -150,7 +173,9 @@ class _Handler(BaseHTTPRequestHandler):
                     tools.append({"name": "confluence.delete_page"})
                 self._send(200, {"jsonrpc": "2.0", "result": {"tools": tools}})
             elif method == "tools/call":
-                if self.mode == "leaky_read":
+                if self.mode == "read_error":
+                    self._send(500, {"detail": "Internal Server Error"})
+                elif self.mode == "leaky_read":
                     self._send(
                         200,
                         {
@@ -188,13 +213,46 @@ def gateway(mode: str):
 
 def test_profile_loads_with_probes() -> None:
     profile = load_profile("litellm")
-    assert len(profile.probes) >= 7
+    assert len(profile.probes) >= 8
     assert all(p.remediation for p in profile.probes)
     assert {p.id for p in profile.probes} >= {"GATE001", "GATE005"}
 
 
 def test_render_replaces_random_token() -> None:
     assert _render("Bearer ${random}", "abc123") == "Bearer abc123"
+
+
+def test_profile_rejects_unknown_probe_keys(tmp_path) -> None:
+    path = tmp_path / "bad.yaml"
+    path.write_text(
+        "id: bad\nprobes:\n"
+        "  - id: X\n    title: t\n    severity: low\n    require: tool\n"
+        "    steps:\n      - {method: GET, path: /}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(GateError, match="unknown require"):
+        load_profile("bad", extra_dirs=[tmp_path])
+    path.write_text(
+        "id: bad\nprobes:\n"
+        "  - id: X\n    title: t\n    severity: low\n"
+        "    steps:\n      - {method: GET, path: /, expect: Deny}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(GateError, match="unknown step expect"):
+        load_profile("bad", extra_dirs=[tmp_path])
+
+
+def test_profile_errors_are_gate_errors_not_tracebacks(tmp_path) -> None:
+    path = tmp_path / "broken.yaml"
+    path.write_text("id: [unclosed\n", encoding="utf-8")
+    with pytest.raises(GateError, match="cannot read"):
+        load_profile("broken", extra_dirs=[tmp_path])
+    path.write_text(
+        "id: broken\nprobes:\n  - id: X\n    title: t\n    severity: nope\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(GateError, match="invalid profile"):
+        load_profile("broken", extra_dirs=[tmp_path])
 
 
 def test_patched_gateway_has_no_findings() -> None:
@@ -210,7 +268,14 @@ def test_vulnerable_gateway_flags_auth_bypass() -> None:
     with gateway("vulnerable") as target:
         result = run_gate(profile, target)
     flagged = {f.probe_id for f in result.findings}
-    assert {"GATE001", "GATE002", "GATE003", "GATE004", "GATE006", "GATE007", "GATE008"} <= flagged
+    assert {"GATE001", "GATE002", "GATE003", "GATE004", "GATE006", "GATE007"} <= flagged
+    # GATE008 must not pile on: on an anonymous gateway its negative control is
+    # served too, so the session-id cause cannot be isolated (GATE003 owns it).
+    assert "GATE008" not in flagged
+    assert any(
+        note.probe_id == "GATE008" and "answers this request anonymously" in note.reason
+        for note in result.notes
+    )
     gate001 = next(f for f in result.findings if f.probe_id == "GATE001")
     assert gate001.severity.value == "critical"
     assert gate001.cve == "CVE-2026-59822"
@@ -221,13 +286,66 @@ def test_vulnerable_gateway_flags_auth_bypass() -> None:
 def test_fabricated_session_id_is_flagged() -> None:
     """A never-issued session id must not buy a tools/list on a hardened server."""
     profile = load_profile("litellm")
-    with gateway("vulnerable") as target:
+    with gateway("session_confused") as target:
         result = run_gate(profile, target)
     gate008 = next(f for f in result.findings if f.probe_id == "GATE008")
     assert gate008.severity.value == "high"
     assert gate008.cve == "CVE-2026-52869"
     assert gate008.owasp.startswith("MCP07")
+    # The negative control (no session header) was denied, then the fabricated
+    # session id was served — both steps are in the evidence.
+    assert "POST /mcp -> 401" in gate008.evidence
+    assert "POST /mcp -> 200" in gate008.evidence
+    # Evidence counts the inventory; tool names stay out of the default output.
+    assert "2 tool(s) served" in gate008.evidence
+    assert not any(name in gate008.evidence for name in TOOLS)
     assert any((entry["session"] or "").startswith("mcp-session-") for entry in SEEN)
+
+
+def test_5xx_on_require_probe_is_not_a_served_tools_claim() -> None:
+    """A 5xx on the bypassed request must not produce a 'served tools' finding."""
+    profile = load_profile("litellm")
+    with gateway("session_500") as target:
+        result = run_gate(profile, target)
+    assert all(f.probe_id != "GATE008" for f in result.findings)
+    assert any(
+        note.probe_id == "GATE008" and "errored instead of denying" in note.reason
+        for note in result.notes
+    )
+
+
+def test_session_error_body_is_not_flagged() -> None:
+    """200 alone is not proof: a JSON-RPC error must not be read as served tools."""
+    profile = load_profile("litellm")
+    with gateway("session_checked") as target:
+        result = run_gate(profile, target)
+    assert all(f.probe_id != "GATE008" for f in result.findings)
+    assert any(
+        note.probe_id == "GATE008" and "no tools inventory" in note.reason
+        for note in result.notes
+    )
+
+
+def test_empty_inventory_is_not_flagged() -> None:
+    """A 200 with an empty tool list must not claim tools were served."""
+    profile = load_profile("litellm")
+    with gateway("session_empty") as target:
+        result = run_gate(profile, target)
+    assert all(f.probe_id != "GATE008" for f in result.findings)
+    assert any(
+        note.probe_id == "GATE008" and "no tools inventory" in note.reason
+        for note in result.notes
+    )
+
+
+def test_control_rejection_is_inconclusive_not_anonymous() -> None:
+    """A 404/5xx control must not be reported as 'the endpoint answers anonymously'."""
+    profile = load_profile("litellm")
+    with gateway("missing") as target:
+        result = run_gate(profile, target)
+    note = next(n for n in result.notes if n.probe_id == "GATE008")
+    assert "not denied (HTTP 404)" in note.reason
+    assert "anonymously" not in note.reason
 
 
 def test_mcp_session_id_is_carried_between_steps() -> None:
@@ -255,6 +373,12 @@ def test_server_error_instead_of_denial_is_a_low_finding() -> None:
     assert gate001.severity.value == "low"
     assert "errored instead of denying" in gate001.title
     assert "500" in gate001.evidence
+    # GATE008's control also 500s: a note, never a "served tools" claim.
+    assert all(f.probe_id != "GATE008" for f in result.findings)
+    assert any(
+        note.probe_id == "GATE008" and "not denied (HTTP 500)" in note.reason
+        for note in result.notes
+    )
 
 
 def test_missing_routes_are_inconclusive_not_findings() -> None:
@@ -277,6 +401,7 @@ def test_cli_vulnerable_exits_one_and_prints_findings() -> None:
     assert result.exit_code == 1, result.output
     assert "GATE001" in result.output
     assert "Fix:" in result.output
+    assert "GHSA-7488-6r32-c95q" in result.output  # advisory citation is visible
 
 
 def test_cli_patched_exits_zero() -> None:
@@ -284,6 +409,14 @@ def test_cli_patched_exits_zero() -> None:
         result = runner.invoke(app, ["gate", target, "--fail-on", "low"])
     assert result.exit_code == 0, result.output
     assert "No findings" in result.output
+
+
+def test_cli_all_inconclusive_does_not_claim_enforcement() -> None:
+    with gateway("missing") as target:
+        result = runner.invoke(app, ["gate", target, "--fail-on", "low"])
+    assert result.exit_code == 0, result.output
+    assert "No findings, but 8 of 8 probe(s) to read" in result.output
+    assert "authentication was enforced" not in result.output
 
 
 def test_cli_json_output_is_machine_readable() -> None:
@@ -294,6 +427,8 @@ def test_cli_json_output_is_machine_readable() -> None:
     assert payload["tool"] == "mcplint gate"
     assert payload["summary"]["total"] > 0
     assert payload["findings"][0]["probeId"].startswith("GATE")
+    gate001 = next(f for f in payload["findings"] if f["probeId"] == "GATE001")
+    assert gate001["docs"].startswith("https://")
 
 
 def test_cli_refuses_remote_target_with_exit_code_two() -> None:
@@ -366,6 +501,27 @@ def test_auth_mode_read_probe_leak_is_redacted(tmp_path, monkeypatch) -> None:
     assert "redacted-secret" not in auth004.evidence
 
 
+def test_auth_mode_read_probe_5xx_is_a_note_not_a_verdict(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("MCPLINT_TEST_KEY", KEY)
+    for expect in ("deny", "allow"):
+        expectations = load_auth_expectations(
+            _write_expectations(
+                tmp_path,
+                read_probe={
+                    "tool": "confluence.get_page",
+                    "args": {},
+                    "expect": expect,
+                },
+            )
+        )
+        with gateway("read_error") as target:
+            result = run_auth_gate(expectations, target)
+        assert all(f.probe_id not in ("AUTH004", "AUTH006") for f in result.findings)
+        assert any(
+            "errored instead of answering" in note.reason for note in result.notes
+        )
+
+
 def test_auth_mode_read_probe_denied_is_clean(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("MCPLINT_TEST_KEY", KEY)
     expectations = load_auth_expectations(
@@ -390,6 +546,31 @@ def test_auth_expectations_reject_literal_key(tmp_path) -> None:
     path = _write_expectations(tmp_path, key="sk-literal-key")
     with pytest.raises(GateError, match="env/"):
         load_auth_expectations(path)
+
+
+def test_auth_expectations_reject_unknown_read_probe_expect(tmp_path) -> None:
+    path = _write_expectations(
+        tmp_path, read_probe={"tool": "confluence.get_page", "expect": "Allow"}
+    )
+    with pytest.raises(GateError, match="read_probe.expect"):
+        load_auth_expectations(path)
+
+
+def test_auth_expectations_reject_read_probe_without_tool(tmp_path) -> None:
+    for broken in ({"args": {"page_id": "1"}}, "confluence.get_page", {}):
+        path = _write_expectations(tmp_path, read_probe=broken)
+        with pytest.raises(GateError, match="read_probe needs a mapping"):
+            load_auth_expectations(path)
+
+
+def test_auth_cli_text_mode_reports_notes(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("MCPLINT_TEST_KEY", KEY)
+    expectations = _write_expectations(tmp_path, expect_tools=[])
+    with gateway("empty_tools") as target:
+        result = runner.invoke(app, ["gate", target, "--auth", str(expectations)])
+    assert result.exit_code == 0, result.output
+    assert "No findings, but 1 note(s) to read" in result.output
+    assert KEY not in result.output
 
 
 def test_auth_cli_clean_and_key_never_printed(tmp_path, monkeypatch) -> None:

@@ -25,7 +25,8 @@ uvx mcplint-sec scan
 MCP went from a few hundred servers to a 10,000+ server ecosystem — and the
 security model did not keep up:
 
-- ~40% of internet-exposed MCP servers have **no authentication** (Censys, 2026)
+- ~40% of internet-exposed MCP servers have **no authentication**
+  ([Censys](https://censys.com/blog/mcp-servers-on-the-internet/), 2026)
 - A single compromised MCP server reaches a **78% attack success rate** when
   five servers share one agent (arXiv 2601.17549)
 - `CVE-2025-6514` in `mcp-remote` (CVSS 9.6) affected a package with 437k+ downloads
@@ -106,9 +107,10 @@ are runtime and operational risks outside the reach of static config scanning.
 
 Static rules can tell you a config *looks* right. `mcplint gate` tells you
 whether a gateway that is **already running** actually enforces
-authentication. It sends one small, read-only request per known failure class —
-derived from public CVEs and advisories — and checks that every one of them is
-denied.
+authentication. It sends a small, read-only battery of requests (one or two
+per failure class) and expects each one to be denied. Five of the eight probes
+are derived from a public CVE or advisory and cite it; three are baseline
+hygiene checks.
 
 Why this exists, in numbers:
 
@@ -116,19 +118,24 @@ Why this exists, in numbers:
   CISA's Known Exploited Vulnerabilities catalog** (2026-09-02) — the "Bearer a"
   one-character token was enough to open an MCP session, and it was chained to
   command injection and cryptominers in the wild.
-- Wiz Research scanned 3,074 public LiteLLM instances: **9.6% accepted the
-  default master key `sk-1234` or required no authentication at all**.
-- A June 2026 audit found **66% of 8,235 registered MCP servers** return a
-  server-authored `instructions` blob; Censys counted **12,500+ MCP services
-  reachable from the internet** in April 2026.
+- [Wiz Research](https://www.wiz.io/blog/off-guard-breaking-litellm-from-authentication-bypass-to-cloud-compromise)
+  scanned 3,074 public LiteLLM instances: **9.6% accepted the default master
+  key `sk-1234` or required no authentication at all**;
+  [Censys](https://censys.com/blog/mcp-servers-on-the-internet/) counted
+  **12,500+ MCP services reachable from the internet** in April 2026.
 
 - **Read-only.** No tool calls, no state changes: the battery only asks
-  "does this endpoint reject anonymous callers?".
+  "does this endpoint reject anonymous callers?". Anonymous-battery findings
+  carry the request trace and status — response bodies (tool names, upstream
+  URLs, stack traces) stay out of that report.
 - **Loopback by default.** Anything that is not `localhost`/`127.0.0.1`
   requires `--allow-host` (confirming the gateway is yours).
 - **Rules as data.** Profiles live in
   [`src/mcplint/gate_data/`](src/mcplint/gate_data); bring your own with
-  `--profiles-dir`.
+  `--profiles-dir`. A step marked `expect: deny` is a negative control (it must
+  be rejected before the probe proceeds), and a probe marked `require: tools`
+  only fires when a 2xx actually carries a tools inventory. Unknown values are
+  rejected at load time.
 
 ```bash
 uvx mcplint-sec gate                            # http://localhost:4000
@@ -145,15 +152,18 @@ uvx mcplint-sec gate --json --fail-on high      # CI-friendly
 | GATE005 | high | CVE-2026-42271 | `/mcp-rest/test/connection` reachable without credentials |
 | GATE006 | high | — | MCP management API reachable without credentials |
 | GATE007 | medium | CVE-2026-49468 | Management route authenticates from a spoofed `Host` header |
-| GATE008 | high | CVE-2026-52869 | MCP `/mcp` served `tools/list` on a never-issued `Mcp-Session-Id` |
+| GATE008 | high | CVE-2026-52869 | MCP `/mcp` served tools on a never-issued `Mcp-Session-Id` (with negative control) |
 
 Exit codes: `0` clean, `1` finding at `--fail-on` severity or above, `2`
 operational error (bad profile, unreachable target, non-loopback target
 without `--allow-host`). Add it to your deploy pipeline and re-run it after
 every gateway upgrade.
 
-Lab-verified against real LiteLLM releases: patched **1.100.0** denies every
-probe; pre-fix **1.83.14** errors instead of denying on the MCP routes —
+Lab-verified against real LiteLLM releases: patched **1.100.0** produces a
+report with no findings (the legacy `/sse` route is absent, so that probe is
+inconclusive, not a denial). Pre-fix **1.83.14** errors instead of denying on
+the MCP routes. GATE008 landed after the lab run and has not been exercised
+against a real release yet —
 see [`research/gate-lab-verification.md`](research/gate-lab-verification.md).
 
 ### Authenticated checks (`gate --auth`)
@@ -195,8 +205,9 @@ retries the canonical path automatically.
 
 Safety: the key and every `upstream_headers` value are read **from environment
 variables only** (literals in the file are rejected) and are never printed; no
-tool calls happen unless `read_probe` is explicitly configured; returned content
-is never echoed (redacted in evidence). `--env-file FILE` is a convenience for
+tool calls happen unless `read_probe` is explicitly configured; tool-call
+content is never echoed (AUTH004/AUTH006 evidence is redacted — the tool
+*inventory* the key can see is printed by design). `--env-file FILE` is a convenience for
 injecting the key and per-server tokens (existing environment variables win;
 keep that file out of version control). Use a dedicated test key that maps to a
 test user.
@@ -210,7 +221,7 @@ permissions:
 
 steps:
   - uses: actions/checkout@v4
-  - uses: dtduc-git/mcplint@v0.2.0
+  - uses: dtduc-git/mcplint@v0.4.0
     with:
       fail-on: high
 ```

@@ -14,6 +14,7 @@
 #   AUTH003 forbidden_servers reachable via scoping   (high)
 #   AUTH004 read_probe returns data (expected deny)   (critical)
 #   AUTH005 expected tools missing                    (low, config drift)
+#   AUTH006 read_probe denied although expect: allow  (medium, broken use case)
 #
 # Use a dedicated TEST key with a test user, not a real person's key.
 
@@ -45,6 +46,8 @@ forbidden_servers:
 # OPTIONAL and opt-in: one read-only tool call that must be denied upstream —
 # use an object (page, issue, record) the test user is NOT allowed to access.
 # Only put read-only tools here; write tools must never appear in this file.
+# Only ONE read_probe is supported — uncomment exactly one of the two below
+# (a duplicate YAML key would silently keep the last one).
 # read_probe:
 #   tool: confluence.get_page
 #   args: { page_id: "00000000" }

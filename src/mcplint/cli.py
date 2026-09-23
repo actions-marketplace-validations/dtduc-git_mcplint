@@ -216,10 +216,22 @@ def _render_gate(result: GateResult, console: Console) -> None:
             f"[dim]test key sees {len(result.inventory)} tool(s):[/dim] {shown}{extra}"
         )
     if not result.findings:
+        if result.notes:
+            detail = (
+                f"{len(result.notes)} note(s)"
+                if result.profile == "auth"
+                else f"{len(result.notes)} of {result.probes_run} probe(s)"
+            )
+            console.print(
+                f"[yellow]No findings, but {detail} to read before concluding "
+                "anything — see the notes below.[/yellow]"
+            )
+            return
         message = (
             "No findings: the test key's visibility and access matched expectations."
             if result.profile == "auth"
-            else "No findings: authentication was enforced on every probed endpoint."
+            else "No findings and no inconclusive probes: every probe ended in a "
+            "401/403."
         )
         console.print(f"[green]{message}[/green]")
         return
@@ -238,7 +250,9 @@ def _render_gate(result: GateResult, console: Console) -> None:
         )
     console.print(table)
     for finding in sorted(result.findings, key=lambda f: f.severity.rank):
-        refs = " · ".join(part for part in (finding.cve, finding.owasp) if part)
+        refs = " · ".join(
+            part for part in (finding.cve, finding.owasp, finding.docs) if part
+        )
         console.print(f"\n[bold]{finding.probe_id}[/bold] {finding.title}")
         if refs:
             console.print(f"  [dim]{refs}[/dim]")

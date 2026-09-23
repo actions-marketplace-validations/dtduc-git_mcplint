@@ -123,20 +123,29 @@ probes:
       values (CVE-2026-49468, fixed in 1.84.0). Upgrade LiteLLM, and terminate
       the gateway behind a proxy that pins the Host header.
   - id: GATE008
-    title: MCP endpoint served a request on a never-issued session id
+    title: MCP endpoint served tools on a never-issued session id
     severity: high
     cve: CVE-2026-52869
     owasp: "MCP07:2025 - Insufficient Authentication & Authorization"
     docs: https://github.com/modelcontextprotocol/python-sdk/security/advisories/GHSA-jpw9-pfvf-9f58
-    request:
-      method: POST
-      path: /mcp
-      headers:
-        Mcp-Session-Id: "mcp-session-${random}"
-      body: '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+    require: tools
+    steps:
+      # Negative control: without a session header the same request must already
+      # be denied. If it is served, the gateway is anonymous (GATE003's job) and
+      # this probe cannot isolate the session-id cause.
+      - method: POST
+        path: /mcp
+        body: '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+        expect: deny
+      - method: POST
+        path: /mcp
+        headers:
+          Mcp-Session-Id: "mcp-session-${random}"
+        body: '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
     remediation: >
-      The endpoint answered a tools/list sent on a session id it never issued
-      (no initialize, no credential). Session ids are state handles, not
+      The endpoint served a tools inventory for a tools/list sent on a session
+      id it never issued (no initialize, no credential), while denying the same
+      request without the header. Session ids are state handles, not
       credentials: a server that routes on the id alone hands the caller the
       privileges of whoever owns the session. This is the class behind
       CVE-2026-52869 (MCP Python SDK HTTP transports, fixed in 1.27.2) and the

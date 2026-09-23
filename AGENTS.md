@@ -13,10 +13,14 @@ servers; no network unless `--online`.
 ## Current state (2026-09-21)
 
 - **v0.4.0 — `mcplint gate` + authenticated checks.** Anonymous battery
-  (`gate_data/litellm.yaml`, 8 probes from CVE-2026-59822 ×2, -42271, -49468,
-  -52869) — GATE008 (v0.4.0) sends a `tools/list` on a never-issued
-  `Mcp-Session-Id: mcp-session-<random>` to catch the session-confusion class
-  (CVE-2026-52869 upstream SDK; mcp-grafana CVE-2026-19516 chain).
+  (`gate_data/litellm.yaml`, 8 probes; 5 cite a CVE — CVE-2026-59822 ×2,
+  -42271, -49468, -52869 — and GATE003/004/006 are hygiene checks) — GATE008
+  (v0.4.0) sends a `tools/list` twice — once with no session
+  header as a negative control, once with a never-issued
+  `Mcp-Session-Id: mcp-session-<random>` — and only fires when the control is
+  denied and the forged session gets a real tool inventory (`require: tools`),
+  to catch the session-confusion class (CVE-2026-52869 upstream SDK; mcp-grafana
+  CVE-2026-19516 chain).
   plus `gate --auth <expectations.yaml>`: with one *test* key (env-var only),
   verifies tool-list filtering (AUTH001/002/005), `x-mcp-servers` scoping
   (AUTH003) and one opt-in read probe against an object the user cannot access
@@ -65,9 +69,12 @@ servers; no network unless `--online`.
   (loader + model), `rules_data/*.yaml` (one file per rule).
 - Rules are **data (YAML)** + small tested functions in `checks.py`. A rule
   declares `id`, `severity`, `owasp`, `check`, `targets`, `params`.
-- Gate probes are **data (YAML)**: one probe per known failure class, each
-  citing the CVE/advisory it comes from (`id`, `severity`, `cve`, `steps`,
-  `remediation`). Probes must stay read-only and must never call tools.
+- Gate probes are **data (YAML)**: one or two probes per failure class; probes
+  derived from a disclosure cite it (`id`, `severity`, `cve`, `steps`,
+  `remediation`).
+  `steps[].expect: deny` marks a negative control that must be rejected first;
+  `require: tools` means a 2xx only counts when it carries a tools inventory.
+  Probes must stay read-only and must never call tools.
 - `gate_data/auth-expectations.example.yaml` documents authenticated checks;
   a literal key must never be accepted from a file (env var only).
 - `fixtures/vulnerable-repo/` + `fixtures/clean-repo/` — every rule needs

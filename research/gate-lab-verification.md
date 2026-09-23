@@ -45,11 +45,12 @@ never as a bypass.
 
 ## Limitations
 
-- The lab has no database, so virtual-key validation paths return
-  `{"detail": "No connected db."}` (HTTP 400) instead of a 401. The full
-  200-response bypass of CVE-2026-59822 needs a Postgres-backed deployment with
-  an OAuth2-passthrough upstream MCP server; that reproduction is out of scope
-  here.
+- The lab has no database, so virtual-key validation paths that require the DB
+  could not be exercised: without it they return `{"detail": "No connected
+  db."}` (HTTP 400), which `mcplint gate` reports as inconclusive, never as a
+  denial. The full 200-response bypass of CVE-2026-59822 needs a Postgres-backed
+  deployment with an OAuth2-passthrough upstream MCP server; that reproduction
+  is out of scope here.
 - Loopback only. `mcplint gate` never probes third-party hosts by default.
 
 ## Reproduce

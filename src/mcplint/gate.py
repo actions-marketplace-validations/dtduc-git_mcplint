@@ -6,8 +6,10 @@ default — to verify that authentication is actually enforced on MCP and
 management endpoints. Probes never execute tools and never mutate state:
 they only ask "does this endpoint deny anonymous callers?".
 
-Each probe is data (YAML under `gate_data/`), not code: one probe per known
-failure class, with the CVE/advisory it comes from.
+Each probe is data (YAML under `gate_data/`), not code: one or two probes per
+failure class, and probes derived from a disclosure cite it. A probe fires only when
+its evidence holds: a step marked `expect: deny` is a negative control that
+must be rejected first, and `require: tools` means a 2xx alone is not enough.
 """
 
 from __future__ import annotations
@@ -28,8 +30,8 @@ import yaml
 from .models import Severity
 
 DENY_CODES = {401, 403}
-# Rejected before (or without) reaching the handler: cannot conclude either way.
-INCONCLUSIVE_CODES = {202, 204, 301, 302, 303, 307, 308, 400, 404, 405, 406, 415, 422}
+# Rejected before an authentication decision could be observed: conclude nothing.
+INCONCLUSIVE_CODES = {301, 302, 303, 307, 308, 400, 404, 405, 406, 415, 422}
 EVIDENCE_MAX = 160
 # tools/list responses with full JSON schemas are often tens of KB;
 # a 4 KiB read truncated them mid-JSON and broke parsing.
@@ -50,6 +52,10 @@ class ProbeRequest:
     path: str
     headers: dict[str, str] = field(default_factory=dict)
     body: str | None = None
+    # "deny": a negative control — the probe only proceeds when this step is
+    # rejected (401/403). None: a normal step; a denial here ends the probe
+    # cleanly, a non-denial becomes the response under test.
+    expect: str | None = None
 
 
 @dataclass
@@ -62,7 +68,9 @@ class Probe:
     cve: str = ""
     owasp: str = ""
     docs: str = ""
-    expect: str = "deny"
+    # "tools": a 2xx only counts as a finding when the body parses as a
+    # tools/list result. "" (default): any non-denial 2xx counts.
+    require: str = ""
 
 
 @dataclass
@@ -86,6 +94,7 @@ class GateFinding:
     remediation: str
     cve: str = ""
     owasp: str = ""
+    docs: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -98,6 +107,7 @@ class GateFinding:
             "remediation": self.remediation.strip(),
             "cve": self.cve,
             "owasp": self.owasp,
+            "docs": self.docs,
         }
 
 
@@ -148,11 +158,15 @@ class GateResult:
 
 
 def _parse_request(raw: dict) -> ProbeRequest:
+    expect = str(raw["expect"]) if raw.get("expect") else None
+    if expect not in (None, "deny"):
+        raise GateError(f"unknown step expect: {expect!r} (expected 'deny')")
     return ProbeRequest(
         method=str(raw.get("method", "GET")).upper(),
         path=str(raw["path"]),
         headers={str(k): str(v) for k, v in (raw.get("headers") or {}).items()},
         body=raw.get("body"),
+        expect=expect,
     )
 
 
@@ -162,39 +176,56 @@ def load_profile(name: str, extra_dirs: list[Path] | None = None) -> GateProfile
         matches = sorted(directory.glob(f"{name}.y*ml")) if directory.is_dir() else []
         if not matches:
             continue
-        data = yaml.safe_load(matches[0].read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            raise GateError(f"{matches[0]}: profile must be a mapping")
-        probes = []
-        for raw in data.get("probes", []):
-            if raw.get("steps"):
-                steps = [_parse_request(step) for step in raw["steps"]]
-            else:
-                steps = [_parse_request(raw.get("request") or {})]
-            probes.append(
-                Probe(
-                    id=str(raw["id"]),
-                    title=str(raw["title"]),
-                    severity=Severity(str(raw["severity"]).lower()),
-                    steps=steps,
-                    remediation=str(raw.get("remediation", "")),
-                    cve=str(raw.get("cve", "")),
-                    owasp=str(raw.get("owasp", "")),
-                    docs=str(raw.get("docs", "")),
-                    expect=str(raw.get("expect", "deny")),
-                )
-            )
-        return GateProfile(
-            id=str(data.get("id", name)),
-            name=str(data.get("name", name)),
-            probes=probes,
-            default_target=str(data.get("default_target", "http://localhost:4000")),
-            default_headers={
-                str(k): str(v) for k, v in (data.get("default_headers") or {}).items()
-            },
-            docs=str(data.get("docs", "")),
-        )
+        try:
+            return _parse_profile(name, matches[0])
+        except GateError:
+            raise
+        except (OSError, yaml.YAMLError) as exc:
+            raise GateError(f"cannot read {matches[0]}: {exc}") from exc
+        except (KeyError, TypeError, ValueError) as exc:
+            raise GateError(f"{matches[0]}: invalid profile: {exc!r}") from exc
     raise GateError(f"unknown profile: {name!r} (looked in {directory})")
+
+
+def _parse_profile(name: str, path: Path) -> GateProfile:
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise GateError(f"{path}: profile must be a mapping")
+    probes = []
+    for raw in data.get("probes", []):
+        if raw.get("steps"):
+            steps = [_parse_request(step) for step in raw["steps"]]
+        else:
+            steps = [_parse_request(raw.get("request") or {})]
+        require = str(raw.get("require", ""))
+        if require not in ("", "tools"):
+            raise GateError(
+                f"{path}: probe {raw.get('id')}: unknown require: "
+                f"{require!r} (expected 'tools')"
+            )
+        probes.append(
+            Probe(
+                id=str(raw["id"]),
+                title=str(raw["title"]),
+                severity=Severity(str(raw["severity"]).lower()),
+                steps=steps,
+                remediation=str(raw.get("remediation", "")),
+                cve=str(raw.get("cve", "")),
+                owasp=str(raw.get("owasp", "")),
+                docs=str(raw.get("docs", "")),
+                require=require,
+            )
+        )
+    return GateProfile(
+        id=str(data.get("id", name)),
+        name=str(data.get("name", name)),
+        probes=probes,
+        default_target=str(data.get("default_target", "http://localhost:4000")),
+        default_headers={
+            str(k): str(v) for k, v in (data.get("default_headers") or {}).items()
+        },
+        docs=str(data.get("docs", "")),
+    )
 
 
 def normalize_target(target: str) -> str:
@@ -275,14 +306,32 @@ def _request(
     return status, payload, resp_headers
 
 
+@dataclass
+class ProbeOutcome:
+    """What a probe proved: a clean denial, a failed control, or a response.
+
+    - "denied": the gateway rejected the request (401/403) — no bypass observed.
+    - "control": a step declared `expect: deny` was *not* denied, so the probe
+      cannot attribute anything to its bypass — e.g. the whole endpoint serves
+      anonymous callers, which is a different probe's finding.
+    - "responded": the first non-denial response, the one under test.
+    """
+
+    kind: str
+    status: int | None = None
+    payload: str = ""
+    trace: list[str] = field(default_factory=list)
+
+
 def _run_probe(
     probe: Probe, target: str, token: str, default_headers: dict[str, str], timeout: float
-) -> tuple[int, str, list[str]] | None:
+) -> ProbeOutcome:
     """Run one probe's steps in order.
 
-    Returns (status, body, trace) for the first response that was not a denial,
-    or None if the gateway denied a step (401/403). MCP session ids returned by
-    a step are carried into the following steps, like a real client would.
+    MCP session ids returned by a step are carried into the following steps,
+    like a real client would. A step with `expect: deny` is a negative control:
+    it must be rejected for the probe to proceed, otherwise the outcome is a
+    failed control, not a finding.
     """
     session_id: str | None = None
     trace: list[str] = []
@@ -299,14 +348,19 @@ def _run_probe(
             step.method, target + step.path, headers, body, timeout
         )
         trace.append(f"{step.method} {step.path} -> {status}")
+        if step.expect == "deny":
+            if status in DENY_CODES:
+                continue  # control held: keep going
+            return ProbeOutcome("control", status, payload, trace)
         if status in DENY_CODES:
-            return None
+            return ProbeOutcome("denied")
         if first is None:
             first = (status, payload)
         session_id = resp_headers.get("Mcp-Session-Id") or session_id
-    if first is None:  # pragma: no cover - a probe always has at least one step
-        return None
-    return first[0], first[1], trace
+    if first is None:
+        # Every step was a control that held: authentication enforced.
+        return ProbeOutcome("denied")
+    return ProbeOutcome("responded", first[0], first[1], trace)
 
 
 def run_gate(
@@ -328,11 +382,47 @@ def run_gate(
         outcome = _run_probe(
             probe, normalized, token, profile.default_headers, timeout
         )
-        if outcome is None:
-            continue  # denied: authentication enforced
-        status, payload, trace = outcome
-        trail = "; ".join(trace)
+        trail = "; ".join(outcome.trace)
+        if outcome.kind == "denied":
+            continue  # rejected with 401/403: no bypass observed
+        if outcome.kind == "control":
+            if outcome.status is not None and 200 <= outcome.status < 300:
+                # The request without the bypass was served too: the non-denial
+                # on the bypassed request proves nothing about the bypass.
+                reason = (
+                    "negative control was served without the bypass "
+                    f"({trail}) — the endpoint answers this request anonymously; "
+                    "see the anonymous-callers probe for the underlying finding"
+                )
+            else:
+                # Rejected before an authentication decision could be observed
+                # (404/400/5xx...): inconclusive, not evidence of anonymous access.
+                reason = (
+                    f"negative control was not denied (HTTP {outcome.status}) "
+                    f"({trail}) — no authentication decision could be observed"
+                )
+            notes.append(GateNote(probe_id=probe.id, status=outcome.status, reason=reason))
+            continue
+        status, payload = outcome.status, outcome.payload
         if 200 <= status < 300:
+            served: list[str] | None = None
+            if probe.require == "tools":
+                served = _tool_names(_json_from_body(payload))
+                if not served:
+                    notes.append(
+                        GateNote(
+                            probe_id=probe.id,
+                            status=status,
+                            reason=(
+                                "2xx response carried no tools inventory "
+                                f"({trail}) — not counted as a finding"
+                            ),
+                        )
+                    )
+                    continue
+            # Evidence is the request trace and status; response bodies (tool
+            # names, upstream URLs, stack traces) never land in the report.
+            evidence = f"{trail} · {len(served)} tool(s) served" if served is not None else trail
             findings.append(
                 GateFinding(
                     probe_id=probe.id,
@@ -340,10 +430,11 @@ def run_gate(
                     title=probe.title,
                     target=normalized + probe.steps[0].path,
                     status=status,
-                    evidence=f"{trail} · {_snip(payload)}".strip(" ·"),
+                    evidence=evidence,
                     remediation=probe.remediation,
                     cve=probe.cve,
                     owasp=probe.owasp,
+                    docs=probe.docs,
                 )
             )
         elif status in INCONCLUSIVE_CODES:
@@ -357,6 +448,19 @@ def run_gate(
                     ),
                 )
             )
+        elif status >= 500 and probe.require:
+            # A 5xx proves nothing about `require`-gated evidence (no inventory
+            # was served), so a claim about serving it must not be made.
+            notes.append(
+                GateNote(
+                    probe_id=probe.id,
+                    status=status,
+                    reason=(
+                        f"endpoint errored instead of denying ({trail}) — "
+                        "nothing can be concluded about the bypass"
+                    ),
+                )
+            )
         elif status >= 500:
             # The endpoint did not deny cleanly: it errored while handling an
             # unauthenticated request. Not proof of a bypass — but not a denial.
@@ -367,7 +471,7 @@ def run_gate(
                     title=f"{probe.title} — endpoint errored instead of denying",
                     target=normalized + probe.steps[0].path,
                     status=status,
-                    evidence=f"{trail} · {_snip(payload)}".strip(" ·"),
+                    evidence=trail,
                     remediation=(
                         "An unauthenticated request must be rejected with 401/403; "
                         "this endpoint raised a server error instead. Check the "
@@ -376,6 +480,7 @@ def run_gate(
                     ),
                     cve=probe.cve,
                     owasp=probe.owasp,
+                    docs=probe.docs,
                 )
             )
         else:
@@ -440,11 +545,19 @@ def load_auth_expectations(path: Path) -> AuthExpectations:
         )
     raw_probe = data.get("read_probe")
     read_probe = None
-    if isinstance(raw_probe, dict) and raw_probe.get("tool"):
+    if raw_probe is not None:
+        if not isinstance(raw_probe, dict) or not str(raw_probe.get("tool", "")).strip():
+            raise GateError(f"{path}: read_probe needs a mapping with a non-empty 'tool'")
+        probe_expect = str(raw_probe.get("expect", "deny"))
+        if probe_expect not in ("deny", "allow"):
+            raise GateError(
+                f"{path}: read_probe.expect must be 'deny' or 'allow', "
+                f"got {probe_expect!r}"
+            )
         read_probe = ReadProbe(
             tool=str(raw_probe["tool"]),
             args=dict(raw_probe.get("args") or {}),
-            expect=str(raw_probe.get("expect", "deny")),
+            expect=probe_expect,
         )
     upstream_headers: dict[str, str] = {}
     for header, value in (data.get("upstream_headers") or {}).items():
@@ -770,13 +883,24 @@ def run_auth_gate(
         payload = _json_from_body(call_body)
         result = payload.get("result") if isinstance(payload, dict) else None
         denied = (
-            call_status in DENY_CODES
-            or call_status >= 400
+            call_status >= 400
             or (isinstance(payload, dict) and isinstance(payload.get("error"), dict))
             or (isinstance(result, dict) and result.get("isError") is True)
         )
         returned_data = not denied and isinstance(result, dict)
-        if probe.expect == "allow":
+        if call_status >= 500:
+            # A server error is not an access decision: report it, conclude nothing.
+            notes.append(
+                GateNote(
+                    probe_id="AUTH004" if probe.expect == "deny" else "AUTH006",
+                    status=call_status,
+                    reason=(
+                        "read probe errored instead of answering — no access decision "
+                        "could be observed"
+                    ),
+                )
+            )
+        elif probe.expect == "allow":
             # Negative control: the test user SHOULD have access. Returning data
             # is the pass condition; a denial means the use case is broken or the
             # upstream token lacks the required scope.
