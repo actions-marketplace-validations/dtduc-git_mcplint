@@ -221,7 +221,7 @@ permissions:
 
 steps:
   - uses: actions/checkout@v4
-  - uses: dtduc-git/mcplint@v0.4.0
+  - uses: dtduc-git/mcplint@v0.4.1
     with:
       fail-on: high
 ```

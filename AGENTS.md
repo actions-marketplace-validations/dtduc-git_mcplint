@@ -10,8 +10,16 @@ servers; no network unless `--online`.
 - PyPI: `mcplint-sec` (the command is `mcplint`)
 - Install: `uvx mcplint-sec scan`
 
-## Current state (2026-09-21)
+## Current state (2026-09-23)
 
+- **v0.4.1 — GATE008 false-positive fix.** The v0.4.0 probe flagged any 2xx on
+  a fabricated session id, including JSON-RPC errors and empty tools lists.
+  GATE008 now sends `tools/list` twice (no session header as a negative control,
+  then a never-issued `Mcp-Session-Id`) and fires only when the control is
+  denied and the second response carries a real inventory (`require: tools`).
+  Probe YAML validates `steps[].expect` / `require`; findings carry only the
+  request trace (no response bodies); the CLI no longer claims enforcement when
+  probes were inconclusive; AUTH004/AUTH006 treat 5xx as notes (81 tests).
 - **v0.4.0 — `mcplint gate` + authenticated checks.** Anonymous battery
   (`gate_data/litellm.yaml`, 8 probes; 5 cite a CVE — CVE-2026-59822 ×2,
   -42271, -49468, -52869 — and GATE003/004/006 are hygiene checks) — GATE008
