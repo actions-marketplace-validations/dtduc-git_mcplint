@@ -1,0 +1,155 @@
+id: litellm
+name: LiteLLM AI Gateway (MCP + management surfaces)
+default_target: http://localhost:4000
+docs: https://docs.litellm.ai/docs/auth_overview
+default_headers:
+  Accept: "application/json, text/event-stream"
+  Content-Type: application/json
+  User-Agent: "mcplint-gate"
+probes:
+  - id: GATE001
+    title: MCP endpoint accepts a fabricated Authorization bearer
+    severity: critical
+    cve: CVE-2026-59822
+    owasp: "MCP07:2025 - Insufficient Authentication & Authorization"
+    docs: https://github.com/BerriAI/litellm/security/advisories/GHSA-7488-6r32-c95q
+    steps:
+      - method: POST
+        path: /mcp
+        headers:
+          Authorization: "Bearer ${random}"
+        body: '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"mcplint-gate","version":"0.2.0"}}}'
+      - method: POST
+        path: /mcp
+        body: '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+      - method: POST
+        path: /mcp
+        body: '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+    remediation: >
+      The MCP streamable endpoint answered a request carrying a made-up bearer
+      without rejecting it. Upgrade LiteLLM to >= 1.84.0 (CVE-2026-59822:
+      the OAuth2 passthrough fallback replaced failed key validation with an
+      empty identity), keep MCP endpoints off the public network, and verify
+      per-user passthrough never falls back to a stronger identity.
+  - id: GATE002
+    title: MCP endpoint accepts an invalid x-litellm-api-key
+    severity: critical
+    cve: CVE-2026-59822
+    owasp: "MCP07:2025 - Insufficient Authentication & Authorization"
+    docs: https://docs.litellm.ai/docs/auth_overview
+    steps:
+      - method: POST
+        path: /mcp
+        headers:
+          x-litellm-api-key: "Bearer ${random}"
+        body: '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"mcplint-gate","version":"0.2.0"}}}'
+      - method: POST
+        path: /mcp
+        body: '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+    remediation: >
+      The preferred LiteLLM virtual-key header was not validated on the MCP
+      route. Upgrade LiteLLM (>= 1.84.0) and confirm the MCP ASGI routes are
+      behind your network boundary; these routes intentionally bypass the
+      standard FastAPI auth dependency, so the key check is the only gate.
+  - id: GATE003
+    title: MCP endpoint answers anonymous callers
+    severity: high
+    owasp: "MCP07:2025 - Insufficient Authentication & Authorization"
+    steps:
+      - method: POST
+        path: /mcp
+        body: '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"mcplint-gate","version":"0.2.0"}}}'
+      - method: POST
+        path: /mcp
+        body: '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+    remediation: >
+      Anonymous requests must be rejected with 401/403 before any JSON-RPC
+      processing. Require x-litellm-api-key (or Authorization) on every MCP
+      route and front the endpoint with network controls; never expose /mcp
+      directly to the internet.
+  - id: GATE004
+    title: Legacy SSE endpoint answers anonymous callers
+    severity: high
+    owasp: "MCP07:2025 - Insufficient Authentication & Authorization"
+    request:
+      method: GET
+      path: /sse
+      headers:
+        Accept: "text/event-stream"
+    remediation: >
+      The legacy SSE MCP route accepted an anonymous connection. Require a
+      virtual key and network-level authentication; if SSE is not needed,
+      disable the route entirely.
+  - id: GATE005
+    title: MCP test/connection endpoint reachable without credentials
+    severity: high
+    cve: CVE-2026-42271
+    owasp: "MCP05:2025 - Command Injection & Execution"
+    docs: https://github.com/BerriAI/litellm/security/advisories/GHSA-v4p8-mg3p-g94g
+    request:
+      method: POST
+      path: /mcp-rest/test/connection
+      body: "{}"
+    remediation: >
+      These preview endpoints spawned user-supplied stdio configurations on
+      the proxy host and must be admin-only (LiteLLM >= 1.83.7 restricts them
+      to PROXY_ADMIN). Block /mcp-rest/test/* at the reverse proxy when they
+      are not needed.
+  - id: GATE006
+    title: MCP management API reachable without credentials
+    severity: high
+    owasp: "MCP07:2025 - Insufficient Authentication & Authorization"
+    request:
+      method: GET
+      path: /v1/mcp/server
+    remediation: >
+      The management route that lists MCP server configurations answered an
+      unauthenticated request. Require an admin key on management routes and
+      keep them internal; configuration data exposes upstream URLs, auth
+      types and tool inventories.
+  - id: GATE007
+    title: Management route honored a spoofed Host header
+    severity: medium
+    cve: CVE-2026-49468
+    owasp: "MCP07:2025 - Insufficient Authentication & Authorization"
+    docs: https://github.com/BerriAI/litellm/security/advisories/GHSA-4xpc-pv4p-pm3w
+    request:
+      method: GET
+      path: /v1/mcp/server
+      headers:
+        Host: "mcplint-gate.invalid"
+    remediation: >
+      Management routes must not authenticate based on request-derived Host
+      values (CVE-2026-49468, fixed in 1.84.0). Upgrade LiteLLM, and terminate
+      the gateway behind a proxy that pins the Host header.
+  - id: GATE008
+    title: MCP endpoint served tools on a never-issued session id
+    severity: high
+    cve: CVE-2026-52869
+    owasp: "MCP07:2025 - Insufficient Authentication & Authorization"
+    docs: https://github.com/modelcontextprotocol/python-sdk/security/advisories/GHSA-jpw9-pfvf-9f58
+    require: tools
+    steps:
+      # Negative control: without a session header the same request must already
+      # be denied. If it is served, the gateway is anonymous (GATE003's job) and
+      # this probe cannot isolate the session-id cause.
+      - method: POST
+        path: /mcp
+        body: '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+        expect: deny
+      - method: POST
+        path: /mcp
+        headers:
+          Mcp-Session-Id: "mcp-session-${random}"
+        body: '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+    remediation: >
+      The endpoint served a tools inventory for a tools/list sent on a session
+      id it never issued (no initialize, no credential), while denying the same
+      request without the header. Session ids are state handles, not
+      credentials: a server that routes on the id alone hands the caller the
+      privileges of whoever owns the session. This is the class behind
+      CVE-2026-52869 (MCP Python SDK HTTP transports, fixed in 1.27.2) and the
+      mcp-grafana chain CVE-2026-19516 (v1.1.0, bearer auth still opt-in via
+      --server-auth-token). Require authentication independent of the session
+      header, bind each session to the authenticated principal, and answer
+      unknown or mismatched sessions with the same 404 as a missing one.

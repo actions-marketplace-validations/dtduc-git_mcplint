@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import typer
@@ -13,6 +14,16 @@ from rich.table import Table
 from . import __version__
 from .aibom import build_aibom
 from .discovery import discover
+from .gate import (
+    GateError,
+    GateResult,
+    load_auth_expectations,
+    load_env_file,
+    load_profile,
+    result_to_json,
+    run_auth_gate,
+    run_gate,
+)
 from .lockfile import LOCKFILE_NAME, build_lock, load_lock, verify_lock, write_lock
 from .models import ScanResult, severity_from
 from .parse import parse_config_file
@@ -169,6 +180,158 @@ def scan(
 
     threshold = fail_on or str(file_config.get("fail_on", "high"))
     if threshold.lower() != "none" and result.findings:
+        limit = severity_from(threshold)
+        if result.worst_rank <= limit.rank:
+            raise typer.Exit(code=1)
+
+
+SEVERITY_COLORS = {
+    "critical": "red",
+    "high": "orange1",
+    "medium": "yellow",
+    "low": "cyan",
+    "info": "dim",
+}
+
+
+def _render_gate(result: GateResult, console: Console) -> None:
+    console.print(
+        f"[bold]mcplint gate[/bold] profile={result.profile} target={result.target} "
+        f"({result.probes_run} probe(s), read-only)"
+    )
+    if result.profile == "auth" and not result.inventory:
+        console.print(
+            "[yellow]test key sees 0 tool(s)[/yellow] — nothing to compare. Check the "
+            "key's MCP grants (object_permission) and that the upstream token is "
+            "accepted; see the AUTH000 note below."
+        )
+    if result.inventory:
+        shown = ", ".join(result.inventory[:20])
+        extra = (
+            ""
+            if len(result.inventory) <= 20
+            else f" … (+{len(result.inventory) - 20} more)"
+        )
+        console.print(
+            f"[dim]test key sees {len(result.inventory)} tool(s):[/dim] {shown}{extra}"
+        )
+    if not result.findings:
+        if result.notes:
+            detail = (
+                f"{len(result.notes)} note(s)"
+                if result.profile == "auth"
+                else f"{len(result.notes)} of {result.probes_run} probe(s)"
+            )
+            console.print(
+                f"[yellow]No findings, but {detail} to read before concluding "
+                "anything — see the notes below.[/yellow]"
+            )
+            return
+        message = (
+            "No findings: the test key's visibility and access matched expectations."
+            if result.profile == "auth"
+            else "No findings and no inconclusive probes: every probe ended in a "
+            "401/403."
+        )
+        console.print(f"[green]{message}[/green]")
+        return
+    table = Table(header_style="bold")
+    table.add_column("Probe", no_wrap=True)
+    table.add_column("Severity", no_wrap=True)
+    table.add_column("HTTP", no_wrap=True)
+    table.add_column("Finding")
+    for finding in sorted(result.findings, key=lambda f: f.severity.rank):
+        color = SEVERITY_COLORS.get(finding.severity.value, "white")
+        table.add_row(
+            finding.probe_id,
+            f"[{color}]{finding.severity.value}[/{color}]",
+            str(finding.status),
+            finding.title,
+        )
+    console.print(table)
+    for finding in sorted(result.findings, key=lambda f: f.severity.rank):
+        refs = " · ".join(
+            part for part in (finding.cve, finding.owasp, finding.docs) if part
+        )
+        console.print(f"\n[bold]{finding.probe_id}[/bold] {finding.title}")
+        if refs:
+            console.print(f"  [dim]{refs}[/dim]")
+        console.print(f"  [dim]evidence:[/dim] {finding.evidence or '(empty body)'}")
+        console.print(f"  [bold]Fix:[/bold] {finding.remediation.strip()}")
+
+
+@app.command()
+def gate(
+    target: str = typer.Argument(
+        None, help="Gateway base URL (default: the profile's, e.g. http://localhost:4000)."
+    ),
+    profile: str = typer.Option("litellm", "--profile", help="Probe profile to run."),
+    auth: Path = typer.Option(
+        None,
+        "--auth",
+        help="Run authenticated read-only checks using this expectations file "
+        "(see gate_data/auth-expectations.example.yaml).",
+    ),
+    profiles_dir: list[Path] = typer.Option(
+        None, "--profiles-dir", help="Extra profile directory (repeatable)."
+    ),
+    env_file: Path = typer.Option(
+        None,
+        "--env-file",
+        help="Load KEY=VALUE secrets from this file (existing environment wins; "
+        "keep the file out of version control).",
+    ),
+    allow_host: bool = typer.Option(
+        False,
+        "--allow-host",
+        help="Confirm the target host is yours (required for anything not on loopback).",
+    ),
+    timeout: float = typer.Option(15.0, "--timeout", help="Per-request timeout in seconds."),
+    as_json: bool = typer.Option(False, "--json", help="Print results as JSON."),
+    fail_on: str = typer.Option(
+        "high",
+        "--fail-on",
+        help="Exit 1 when a finding at this severity or above exists "
+        "(critical|high|medium|low|info|none).",
+    ),
+) -> None:
+    """Probe a running MCP gateway for missing authentication (read-only).
+
+    By default, sends a battery of unauthenticated requests and checks each one
+    is denied. With --auth, uses one (test) key from an environment variable to
+    verify what that key is allowed to see and reach. It never calls write
+    tools and never changes state. Only loopback targets are allowed unless
+    --allow-host is given.
+    """
+    try:
+        if env_file is not None:
+            for name, value in load_env_file(env_file).items():
+                os.environ.setdefault(name, value)
+        if auth is not None:
+            expectations = load_auth_expectations(auth)
+            result = run_auth_gate(
+                expectations, target, allow_host=allow_host, timeout=timeout
+            )
+        else:
+            effective_profile = load_profile(profile, extra_dirs=profiles_dir)
+            result = run_gate(
+                effective_profile, target, allow_host=allow_host, timeout=timeout
+            )
+    except GateError as exc:
+        err_console.print(f"[red]gate error:[/red] {exc}")
+        raise typer.Exit(code=2) from exc
+
+    if as_json:
+        console.print_json(result_to_json(result))
+    else:
+        _render_gate(result, console)
+        for note in result.notes:
+            console.print(
+                f"[dim]· {note.probe_id}: {note.reason} (HTTP {note.status})[/dim]"
+            )
+
+    threshold = fail_on.lower()
+    if threshold != "none" and result.findings:
         limit = severity_from(threshold)
         if result.worst_rank <= limit.rank:
             raise typer.Exit(code=1)
