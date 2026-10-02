@@ -57,6 +57,10 @@ def strip_jsonc(text: str) -> str:
 def guess_client(path: Path) -> str:
     posix = path.as_posix()
     name = path.name.lower()
+    # Precise check first: a `.codex/config.toml` under any parent directory
+    # (e.g. `windsurf-demo/`) is still Codex.
+    if name == "config.toml" and ".codex" in posix:
+        return "codex"
     if "cline" in name or "saoudrizwan.claude-dev" in posix:
         return "cline"
     if ".cursor/" in posix:
@@ -67,8 +71,6 @@ def guess_client(path: Path) -> str:
         return "vscode"
     if "opencode" in name:
         return "opencode"
-    if ".codex/" in posix:
-        return "codex"
     if "gemini" in posix:
         return "gemini"
     if name == ".mcp.json" or "claude" in posix:
@@ -114,6 +116,11 @@ def _normalize_server(name: str, entry: Any) -> MCPServer | None:
 
     env = _string_map(entry.get("env") or entry.get("environment"))
     headers = _string_map(entry.get("headers"))
+    # Codex TOML uses `http_headers` for the same thing the `headers` key
+    # holds elsewhere; without this they are invisible to the rules.
+    http_headers = entry.get("http_headers")
+    if isinstance(http_headers, dict):
+        headers.update(_string_map(http_headers))
 
     url_value = (
         entry.get("url")

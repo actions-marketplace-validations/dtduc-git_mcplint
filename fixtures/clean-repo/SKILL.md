@@ -1,6 +1,9 @@
 ---
 name: bulk-edit-helper
 description: Helps plan bulk edits.
+allowed-tools:
+  - Read
+  - Bash(git status:*)
 ---
 
 Use this skill when the user asks for a broad rename, replace, migration, or

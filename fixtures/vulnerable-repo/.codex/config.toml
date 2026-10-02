@@ -2,3 +2,7 @@
 command = "uvx"
 args = ["internal-search-mcp"]
 env = { INTERNAL_SEARCH_TOKEN = "tok_live_1234567890abcdef1234567890abcdef" }
+
+[mcp_servers.vendor-legacy]
+url = "https://mcp.vendor.example/mcp"
+http_headers = { "Authorization" = "Bearer tok_live_1234567890abcdef1234567890abcdef" }

@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from mcplint.parse import parse_config_file, strip_jsonc
+from mcplint.parse import guess_client, parse_config_file, strip_jsonc
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures"
 
@@ -22,10 +22,17 @@ def test_parse_claude_json() -> None:
 def test_parse_codex_toml() -> None:
     config = parse_config_file(FIXTURES / "vulnerable-repo/.codex/config.toml")
     assert config is not None
-    assert len(config.servers) == 1
-    server = config.servers[0]
-    assert server.name == "internal-search"
+    assert len(config.servers) == 2
+    server = next(s for s in config.servers if s.name == "internal-search")
     assert server.env["INTERNAL_SEARCH_TOKEN"].startswith("tok_live")
+    vendor = next(s for s in config.servers if s.name == "vendor-legacy")
+    assert vendor.transport == "http"
+    assert vendor.headers["Authorization"].startswith("Bearer tok_live")
+
+
+def test_guess_client_prefers_exact_codex_path(tmp_path: Path) -> None:
+    assert guess_client(tmp_path / "windsurf-demo" / ".codex" / "config.toml") == "codex"
+    assert guess_client(tmp_path / ".codex" / ".mcp.json") == "claude-code"
 
 
 def test_parse_opencode_json() -> None:

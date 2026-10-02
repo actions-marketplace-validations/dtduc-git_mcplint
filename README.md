@@ -79,7 +79,7 @@ the `mcplint` plugin (a skill that runs the pinned scanner):
 ```
 
 The plugin is skill-only: it runs no code of its own and instructs Claude to
-invoke `uvx --from mcplint-sec==0.5.0 mcplint …` locally — same offline
+invoke `uvx --from mcplint-sec==0.6.0 mcplint …` locally — same offline
 guarantees as the CLI.
 
 ## What it scans
@@ -97,7 +97,10 @@ Scans recurse into subdirectories (`node_modules`, virtualenvs and build
 outputs are skipped), so monorepos work out of the box. `.claude-plugin/plugin.json`
 is scanned in repository scans too (inline `mcpServers` is part of a plugin's MCP
 surface), so `lock` and `inventory` output can change for repos that ship a plugin
-manifest — regenerate the lockfile after upgrading.
+manifest — regenerate the lockfile after upgrading. The same applies to Codex
+configs that use `http_headers`: those headers are now part of the server
+fingerprint, so regenerate the lockfile after upgrading to avoid a spurious
+lockfile-drift finding.
 
 ## Rules
 
@@ -116,13 +119,18 @@ manifest — regenerate the lockfile after upgrading.
 | MCP011 | medium | MCP03 Tool Poisoning | cross-config server name shadowing |
 | MCP012 | high | MCP03 Tool Poisoning | lockfile drift (rug-pull detection) |
 | MCP013 | high | MCP04 Supply Chain | pinned packages matching OSV advisories (`--online`) |
+| MCP014 | low | — (MCP lifecycle) | deprecated HTTP+SSE transport — migrate to Streamable HTTP |
+| MCP015 | medium | MCP02 Scope Creep | skill `allowed-tools` auto-approves wildcards or an unrestricted shell |
 
 Rules are data: plain YAML in [`src/mcplint/rules_data/`](src/mcplint/rules_data).
 Bring your own with `--rules-dir ./my-rules`.
 
-Coverage: the 13 rules map to 7 of the 10 OWASP MCP Top 10 categories; MCP08
-(audit & telemetry), MCP09 (shadow servers) and MCP10 (context over-sharing)
-are runtime and operational risks outside the reach of static config scanning.
+Coverage: the 14 OWASP-mapped rules cover 7 of the 10 OWASP MCP Top 10
+categories; MCP08 (audit & telemetry), MCP09 (shadow servers) and MCP10
+(context over-sharing) are runtime and operational risks outside the reach of
+static config scanning. MCP014 tracks the MCP spec deprecation lifecycle
+rather than an OWASP entry: the HTTP+SSE transport was deprecated in the
+2025-03-26 revision and reclassified under the 2026-07-28 lifecycle policy.
 
 ## Runtime gate
 
@@ -242,7 +250,7 @@ permissions:
 
 steps:
   - uses: actions/checkout@v4
-  - uses: dtduc-git/mcplint@v0.5.0
+  - uses: dtduc-git/mcplint@v0.6.0
     with:
       fail-on: high
 ```
@@ -259,6 +267,8 @@ Or scaffold this workflow and a starter config with `uvx mcplint-sec init`.
    lookups only) or explicitly point `gate` at a remote host.
 3. **Pin and diff.** `.mcplint.lock.json` fingerprints every server (salted
    hashes for env values) so post-approval changes are visible in `git diff`.
+   The fingerprint hashes commands and URLs without a secret store: treat a
+   committed lockfile as sensitive if your configs may embed credentials.
 4. **Rules as data.** YAML + a small, tested check engine — contributions do
    not need to touch the scanner core.
 5. **Non-goals:** no gateway, no proxy, no runtime traffic monitoring, no SaaS.

@@ -1,0 +1,16 @@
+id: MCP015
+title: Skill auto-approves unrestricted tool access
+severity: medium
+owasp: "MCP02:2025 - Privilege Escalation via Scope Creep"
+check: unrestricted_allowed_tools
+targets: [instructions]
+description: >
+  A skill's `allowed-tools` frontmatter pre-approves its tools without a
+  permission prompt. Pre-approving a wildcard or an unrestricted shell means
+  injected instructions in the same skill can run commands and touch files
+  with no consent step. Scope grants to the exact commands the skill needs
+  to perform its task.
+remediation: >
+  Replace wildcard or bare `Bash` entries with scoped rules such as
+  `Bash(git status:*)`, or remove `allowed-tools` so each call is prompted.
+params: {}

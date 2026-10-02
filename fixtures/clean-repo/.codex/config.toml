@@ -1,0 +1,4 @@
+[mcp_servers.vendor]
+url = "https://mcp.vendor.example/mcp"
+bearer_token_env_var = "VENDOR_MCP_TOKEN"
+env_http_headers = { Authorization = "VENDOR_MCP_TOKEN" }

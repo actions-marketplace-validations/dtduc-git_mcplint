@@ -5,7 +5,7 @@ user data.
 
 - **The plugin itself** runs no code and makes no network requests. It contains
   a skill that instructs Claude to run the pinned `mcplint` CLI on your machine.
-- **Installing the tool** downloads the pinned package (`mcplint-sec==0.5.0`)
+- **Installing the tool** downloads the pinned package (`mcplint-sec==0.6.0`)
   from PyPI the first time, through `uvx` or `pip`.
 - **mcplint scans local configuration files** to find MCP server definitions
   and to flag secrets hardcoded in them. File contents never leave the machine,

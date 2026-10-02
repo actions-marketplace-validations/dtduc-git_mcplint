@@ -1,7 +1,7 @@
 {
   "name": "mcplint",
   "displayName": "mcplint — MCP config security scanner",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Audit MCP client configs for OWASP MCP Top 10 risks, detect MCP server drift, and export an MCP AIBOM — offline, static, never executes MCP servers.",
   "author": {
     "name": "Duke - Duc Dinh",

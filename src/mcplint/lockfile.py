@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import Finding, MCPConfigFile, Severity
-from .packages import package_specs
+from .packages import package_display, package_specs
 from .rules.model import Rule
 
 LOCKFILE_NAME = ".mcplint.lock.json"
@@ -28,8 +28,10 @@ def _sha256_file(path: Path) -> str:
 
 
 def _secret_hash(salt: str, value: str) -> str:
-    # Salted so the lock cannot be used as a dictionary oracle for weak secrets,
-    # while still detecting value changes.
+    # The salt is stored in the lockfile, so this is change detection, not a
+    # secret store: it only makes casual eyeballing of env values harder. The
+    # rest of the fingerprint (command, url) is hashed without a salt — treat a
+    # committed lockfile as sensitive when configs may embed credentials.
     return _sha256_text(f"{salt}:{value}")[:16]
 
 
@@ -53,7 +55,7 @@ def _server_fingerprint(server: Any, salt: str) -> dict[str, Any]:
     return {
         "fingerprint": _sha256_text(json.dumps(payload, sort_keys=True)),
         "transport": server.transport,
-        "package": specs[0].raw if specs else None,
+        "package": package_display(specs[0]) if specs else None,
     }
 
 

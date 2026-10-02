@@ -15,7 +15,7 @@ lockfile for drift detection, and a CycloneDX AIBOM export.
 ## What it runs and connects to
 
 - The plugin itself runs no code. The skill only tells Claude to invoke
-  `uvx --from mcplint-sec==0.5.0 mcplint …` on your machine. The `uv` tool
+  `uvx --from mcplint-sec==0.6.0 mcplint …` on your machine. The `uv` tool
   downloads that pinned package from PyPI the first time it runs.
 - mcplint only reads configuration files, locally, to extract MCP server
   definitions and to flag secrets hardcoded in them. It never executes or
@@ -30,8 +30,8 @@ lockfile for drift detection, and a CycloneDX AIBOM export.
 ## Requirements
 
 - `uv` available on `PATH` (https://docs.astral.sh/uv/). Without it, install
-  mcplint with `pip install mcplint-sec==0.5.0` and replace `uvx --from
-  mcplint-sec==0.5.0 mcplint` with `mcplint`.
+  mcplint with `pip install mcplint-sec==0.6.0` and replace `uvx --from
+  mcplint-sec==0.6.0 mcplint` with `mcplint`.
 
 ## License
 

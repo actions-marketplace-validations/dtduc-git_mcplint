@@ -8,11 +8,11 @@ description: Audit MCP client configurations (.mcp.json, Cursor/Windsurf/VS Code
 Invoke mcplint through the pinned distribution (never an unpinned one):
 
 ```bash
-uvx --from mcplint-sec==0.5.0 mcplint <command>
+uvx --from mcplint-sec==0.6.0 mcplint <command>
 ```
 
 If `uvx` is unavailable (for example in a hosted sandbox), fall back to
-`pip install mcplint-sec==0.5.0` and run `mcplint` directly. If neither works,
+`pip install mcplint-sec==0.6.0` and run `mcplint` directly. If neither works,
 tell the user this skill needs a machine where the CLI can run.
 
 mcplint reads configuration files only. It never executes or contacts MCP
@@ -26,9 +26,9 @@ before running.
 ## Scan
 
 ```bash
-uvx --from mcplint-sec==0.5.0 mcplint scan           # current directory
-uvx --from mcplint-sec==0.5.0 mcplint scan --home    # + user-level configs and installed Claude Code plugins
-uvx --from mcplint-sec==0.5.0 mcplint scan --json    # machine-readable output
+uvx --from mcplint-sec==0.6.0 mcplint scan           # current directory
+uvx --from mcplint-sec==0.6.0 mcplint scan --home    # + user-level configs and installed Claude Code plugins
+uvx --from mcplint-sec==0.6.0 mcplint scan --json    # machine-readable output
 ```
 
 `--home` also reads the user-level config files of the MCP clients on the
@@ -47,8 +47,8 @@ no fix text. Summarize the result; paste the full report only when asked.
 ## Drift detection
 
 ```bash
-uvx --from mcplint-sec==0.5.0 mcplint lock           # write or refresh the lockfile
-uvx --from mcplint-sec==0.5.0 mcplint lock --check   # fail on drift (CI)
+uvx --from mcplint-sec==0.6.0 mcplint lock           # write or refresh the lockfile
+uvx --from mcplint-sec==0.6.0 mcplint lock --check   # fail on drift (CI)
 ```
 
 `lock --check` exits 0 (no drift), 1 (drift), 2 (no MCP configs found, or no
@@ -59,14 +59,14 @@ package, url, headers, env) is the signal.
 ## Inventory (AIBOM)
 
 ```bash
-uvx --from mcplint-sec==0.5.0 mcplint inventory -o aibom.json
+uvx --from mcplint-sec==0.6.0 mcplint inventory -o aibom.json
 ```
 
 ## Explain rules
 
 ```bash
-uvx --from mcplint-sec==0.5.0 mcplint rules list
-uvx --from mcplint-sec==0.5.0 mcplint rules explain MCP001
+uvx --from mcplint-sec==0.6.0 mcplint rules list
+uvx --from mcplint-sec==0.6.0 mcplint rules explain MCP001
 ```
 
 ## Boundaries

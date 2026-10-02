@@ -1,0 +1,18 @@
+id: MCP014
+title: Deprecated HTTP+SSE transport
+severity: low
+owasp: ""
+check: deprecated_sse_transport
+targets: [config]
+description: >
+  The HTTP+SSE transport was deprecated in the 2025-03-26 MCP revision and
+  reclassified as Deprecated under the 2026-07-28 feature lifecycle policy
+  (SEP-2596, https://modelcontextprotocol.io/specification/2026-07-28/changelog),
+  which guarantees at least twelve months before removal. New clients should
+  use Streamable HTTP, which carries the per-request routing headers
+  (`Mcp-Method`/`Mcp-Name`) and auth metadata that gateways rely on.
+remediation: >
+  Point the server at its Streamable HTTP endpoint (usually the same host,
+  path `/mcp`) and drop `"type": "sse"` or the `/sse` URL. Check the server's
+  documentation for its current endpoint before switching.
+params: {}

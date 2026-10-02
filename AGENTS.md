@@ -3,15 +3,52 @@
 ## What this is
 
 Local-first, CI-native security scanner for MCP configs and agent skill files.
-13 rules mapped to the OWASP MCP Top 10. Static only — it never executes MCP
-servers; no network unless `--online`.
+15 rules (14 mapped to the OWASP MCP Top 10 + 1 spec-lifecycle). Static only —
+it never executes MCP servers; no network unless `--online`.
 
 - GitHub: https://github.com/dtduc-git/mcplint
 - PyPI: `mcplint-sec` (the command is `mcplint`)
 - Install: `uvx mcplint-sec scan`
 
-## Current state (2026-09-26)
+## Current state (2026-10-01)
 
+- **v0.6.0 — Codex/TOML parsing parity + two rules.** Codex TOML
+  `http_headers` now merges into normalized headers: MCP001 previously missed
+  literal tokens there and MCP006 saw no Authorization; MCP001 scans both raw
+  header maps plus `bearer_token_env_var` / `env_http_headers` values and now
+  applies the sensitive-header heuristic (`X-Api-Key: <32 hex>` was invisible
+  before; dogfood found 2 real Datadog keys). MCP006 counts
+  `bearer_token_env_var` and auth-named `env_http_headers` as auth material
+  **only for `client == "codex"`** (13 real-world false positives fixed);
+  `guess_client` now detects `.codex/config.toml` before substring heuristics.
+  New rules: MCP014 deprecated HTTP+SSE transport (low, spec-lifecycle) fires
+  on `type: sse`, `/sse` URL paths (advisory wording when `type` is explicit)
+  and `mcp-remote`-style wrappers (`--transport sse-only`, `/sse` URL in
+  args); findings never echo neighboring command tokens, URLs in messages are
+  sanitized (host only; malformed refused), and all URL parsing is guarded so
+  malformed URLs no longer crash a scan. Package extraction now uses
+  per-runner flag tables (npx/pnpx/bunx, uvx, pipx; `--package`/`--from`/
+  `--spec` values are the package, `-p` is `--python` for uv, pipx `run` is
+  skipped and `runpip` ignored, combined short booleans like `-yq` parsed),
+  treats `--flag=value` as self-contained, stops at the first unknown flag
+  (its trailing positionals are never treated as packages), and allow-lists
+  npm/PyPI grammars with exact-version pinning (`_NPM_VERSION_RE` /
+  PEP 440-ish `_PYPI_VERSION_RE`; ranges, partial versions and dist-tags are
+  unpinned); git URLs count as pinned only for a 40/64-hex commit ref, and
+  `auto-approved` only counts `-y` before the package for npm runners.
+  `package_display()` sanitizes what reaches findings, the lockfile `package`
+  field, AIBOM `mcplint:package`/purls and OSV lookups (URL packages are never
+  registry names — userinfo `@` can no longer look like a version pin; PyPI
+  extras are stripped from the queried name). MCP015 reads skill
+  `allowed-tools` (comma / space / YAML list / flow list; YAML-error fallback
+  with comment stripping for bare `*` aliases; `ValueError`/`RecursionError`
+  from PyYAML also fall back instead of crashing a scan) and flags any-tool
+  wildcards `*`, `mcp__*`, `mcp__*__*` and an unrestricted shell (`Bash`,
+  `Bash(*)`, `Bash(:*)`, `Bash(* *)`) at medium (dogfood on `~`: 6 real
+  bare-Bash marketplace skills). Fixtures + unit tests for all four
+  changes (122 tests); clean fixture stays at zero. **Upgrade note:** the
+  `http_headers` merge changes lock fingerprints for Codex servers that use
+  them — regenerate with `lock` after upgrading (same policy as v0.5.0).
 - **v0.5.0 — installed-plugin scanning + Claude Code plugin packaging.**
   `--home` also scans installed Claude Code plugins: cache versions via
   `installed_plugins.json` installPath (orphans skipped), `synced/` + `local/`
