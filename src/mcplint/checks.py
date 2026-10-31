@@ -6,11 +6,12 @@ import json
 import re
 import stat
 import urllib.error
-import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 from .lockfile import verify_lock
 from .models import (
@@ -20,7 +21,17 @@ from .models import (
     ScanContext,
     Severity,
 )
-from .packages import normalize_package, package_specs
+from .packages import (
+    endpoint_display as _safe_endpoint,
+)
+from .packages import (
+    normalize_package,
+    package_display,
+    package_specs,
+)
+from .packages import (
+    parse_url as _parse_url,
+)
 from .rules.model import Rule
 
 CheckFn = Callable[[Rule, Any, ScanContext], list[Finding]]
@@ -69,8 +80,11 @@ def _is_env_ref(value: str) -> bool:
     stripped = value.strip()
     if not stripped:
         return True
-    if "${" in stripped:
+    if "${" in stripped or "{env:" in stripped or "{file:" in stripped:
         return True
+    prefix, _, rest = stripped.partition(" ")
+    if rest and prefix.lower() in ("bearer", "basic", "token"):
+        return _is_env_ref(rest)
     return stripped.startswith("$") and " " not in stripped
 
 
@@ -150,6 +164,7 @@ def secrets_in_config(rule: Rule, target: MCPConfigFile, ctx: ScanContext) -> li
     findings: list[Finding] = []
     patterns = rule.params.get("patterns", [])
     suspicious_key = rule.params.get("suspicious_env_key", "")
+    suspicious_header_key = rule.params.get("suspicious_header_key") or suspicious_key
     min_len = int(rule.params.get("min_len", 12))
 
     def scan_value(server_name: str, key: str, value: str) -> None:
@@ -197,7 +212,31 @@ def secrets_in_config(rule: Rule, target: MCPConfigFile, ctx: ScanContext) -> li
                     line=_line_of(target.raw_text, server.name),
                 )
             )
-        for header, value in server.headers.items():
+        # Scan every raw source too: a value can be hidden under a colliding
+        # key after normalization (e.g. `headers` + `http_headers`). The last
+        # field marks whether the sensitive-key heuristic applies — for Codex
+        # `bearer_token_env_var` / `env_http_headers` the value is an env var
+        # name by contract, so only recognizable token patterns count there.
+        header_items: list[tuple[str, str, bool]] = [
+            (header, value, True) for header, value in server.headers.items()
+        ]
+        seen = {(header, value) for header, value, _ in header_items}
+        for source in ("headers", "http_headers"):
+            raw_map = server.raw.get(source)
+            if isinstance(raw_map, dict):
+                for raw_key, raw_value in raw_map.items():
+                    pair = (str(raw_key), str(raw_value))
+                    if pair not in seen:
+                        header_items.append((pair[0], pair[1], True))
+                        seen.add(pair)
+        bearer = server.raw.get("bearer_token_env_var")
+        if isinstance(bearer, str) and bearer.strip():
+            header_items.append(("bearer_token_env_var", bearer, False))
+        env_headers = server.raw.get("env_http_headers")
+        if isinstance(env_headers, dict):
+            for raw_key, raw_value in env_headers.items():
+                header_items.append((f"env_http_headers.{raw_key}", str(raw_value), False))
+        for header, value, heuristic in header_items:
             if _is_env_ref(value) or _looks_placeholder(value):
                 continue
             matched = _first_matching_pattern(value, patterns)
@@ -208,9 +247,22 @@ def secrets_in_config(rule: Rule, target: MCPConfigFile, ctx: ScanContext) -> li
                         target.path,
                         f"{matched} found in header '{header}' of server '{server.name}'",
                         server=server.name,
-                        line=_line_of(target.raw_text, header),
+                        line=_line_of(target.raw_text, header.split(".")[-1]),
                     )
                 )
+            elif heuristic and suspicious_header_key and re.search(suspicious_header_key, header):
+                if len(value) >= min_len:
+                    findings.append(
+                        _finding(
+                            rule,
+                            target.path,
+                            f"literal value for sensitive header '{header}' (length "
+                            f"{len(value)}) — reference it from the environment instead",
+                            server=server.name,
+                            line=_line_of(target.raw_text, header.split(".")[-1]),
+                            severity=Severity.HIGH,
+                        )
+                    )
     return findings
 
 
@@ -252,11 +304,12 @@ def unpinned_package(rule: Rule, target: MCPConfigFile, ctx: ScanContext) -> lis
                 continue
             severity = Severity.HIGH if spec.auto_approve else rule.severity
             extra = " and auto-approved (-y/--yes)" if spec.auto_approve else ""
+            display = package_display(spec)
             findings.append(
                 _finding(
                     rule,
                     target.path,
-                    f"'{spec.raw}' is not pinned to a version{extra} — a malicious or "
+                    f"'{display}' is not pinned to a version{extra} — a malicious or "
                     "broken release is picked up on every run",
                     server=server.name,
                     line=_line_of(target.raw_text, spec.raw),
@@ -307,7 +360,8 @@ def typosquat_package(rule: Rule, target: MCPConfigFile, ctx: ScanContext) -> li
                         _finding(
                             rule,
                             target.path,
-                            f"'{spec.raw}' is {distance} edit(s) away from popular package "
+                            f"'{package_display(spec)}' is {distance} edit(s) away from popular "
+                            "package "
                             f"'{original}' — possible typosquat",
                             server=server.name,
                             line=_line_of(target.raw_text, spec.raw),
@@ -323,15 +377,16 @@ def insecure_remote_transport(rule: Rule, target: MCPConfigFile, ctx: ScanContex
     for server in target.servers:
         if not server.url:
             continue
-        parsed = urllib.parse.urlparse(server.url)
-        if parsed.scheme == "http" and not _is_local_host(parsed.hostname):
+        parsed = _parse_url(server.url)
+        if parsed is not None and parsed.scheme == "http" and not _is_local_host(parsed.hostname):
             severity = Severity.LOW if _is_internal_host(parsed.hostname) else rule.severity
             scope = "internal host" if severity is Severity.LOW else "public host"
             findings.append(
                 _finding(
                     rule,
                     target.path,
-                    f"remote endpoint '{server.url}' uses plain HTTP ({scope}) — tool calls and "
+                    f"remote endpoint '{_safe_endpoint(server.url)}' uses plain HTTP ({scope}) — "
+                    "tool calls and "
                     "results travel unencrypted",
                     server=server.name,
                     line=_line_of(target.raw_text, server.url),
@@ -348,25 +403,105 @@ def remote_without_auth(rule: Rule, target: MCPConfigFile, ctx: ScanContext) -> 
     for server in target.servers:
         if not server.url:
             continue
-        parsed = urllib.parse.urlparse(server.url)
-        if _is_local_host(parsed.hostname):
+        parsed = _parse_url(server.url)
+        if parsed is None or _is_local_host(parsed.hostname):
             continue
-        has_auth = any(key.lower() == "authorization" for key in server.headers)
+        if target.client == "codex":
+            header_keys = [str(key) for key in server.headers]
+        else:
+            raw_headers = server.raw.get("headers")
+            header_keys = [str(key) for key in raw_headers] if isinstance(raw_headers, dict) else []
+        has_auth = any(key.lower() == "authorization" for key in header_keys)
         if not has_auth and auth_pattern:
             has_auth = any(re.search(auth_pattern, key) for key in server.env)
             if not has_auth:
-                has_auth = any(re.search(auth_pattern, key) for key in server.headers)
+                has_auth = any(re.search(auth_pattern, key) for key in header_keys)
+        if not has_auth and target.client == "codex":
+            # Codex TOML conventions: the token is referenced, not literal.
+            has_auth = bool(server.raw.get("bearer_token_env_var"))
+            env_headers = server.raw.get("env_http_headers")
+            if not has_auth and isinstance(env_headers, dict) and auth_pattern:
+                has_auth = any(re.search(auth_pattern, str(key)) for key in env_headers)
         if not has_auth:
             findings.append(
                 _finding(
                     rule,
                     target.path,
-                    f"remote endpoint '{server.url}' references no authentication material "
+                    f"remote endpoint '{_safe_endpoint(server.url)}' references no "
+                    "authentication material "
                     "(no Authorization header, no token/key env)",
                     server=server.name,
                     line=_line_of(target.raw_text, server.url),
                 )
             )
+    return findings
+
+
+_SSE_URL_RE = re.compile(r"^https?://\S+$", re.IGNORECASE)
+
+
+def _looks_like_sse_url(value: str) -> bool:
+    if not _SSE_URL_RE.match(value):
+        return False
+    parsed = _parse_url(value)
+    return parsed is not None and parsed.path.rstrip("/").endswith("/sse")
+
+
+@check("deprecated_sse_transport")
+def deprecated_sse_transport(
+    rule: Rule, target: MCPConfigFile, ctx: ScanContext
+) -> list[Finding]:
+    findings: list[Finding] = []
+    for server in target.servers:
+        declared = server.transport == "sse"
+        legacy = server.url if (server.url and _looks_like_sse_url(server.url)) else None
+        wrapped = None
+        if not legacy:
+            for index, token in enumerate(server.command):
+                if _looks_like_sse_url(token):
+                    legacy = token
+                    break
+                if token == "sse-only":
+                    wrapped = "sse-only"
+                    break
+                if token.startswith("--transport="):
+                    transport = token.split("=", 1)[1]
+                    if transport in ("sse", "sse-only"):
+                        wrapped = f"--transport {transport}"
+                        break
+                if token == "--transport" and index + 1 < len(server.command):
+                    transport = server.command[index + 1]
+                    if transport in ("sse", "sse-only"):
+                        wrapped = f"--transport {transport}"
+                        break
+        if not declared and not legacy and not wrapped:
+            continue
+        if declared:
+            message = (
+                f"server '{server.name}' declares the deprecated HTTP+SSE transport "
+                "(type: sse) — migrate to Streamable HTTP"
+            )
+        elif wrapped:
+            message = (
+                f"server '{server.name}' wraps a legacy SSE transport in its command "
+                f"({wrapped}) — if the server still speaks it, migrate to Streamable HTTP"
+            )
+        else:
+            message = (
+                f"server '{server.name}' points at a legacy /sse endpoint "
+                f"({_safe_endpoint(legacy)}) — if the server still speaks it, migrate to "
+                "Streamable HTTP"
+            )
+        needle = legacy or (wrapped.split()[-1] if wrapped else server.name)
+        findings.append(
+            _finding(
+                rule,
+                target.path,
+                message,
+                server=server.name,
+                line=_line_of(target.raw_text, needle),
+            )
+        )
     return findings
 
 
@@ -410,7 +545,7 @@ def shell_execution_server(rule: Rule, target: MCPConfigFile, ctx: ScanContext) 
                 _finding(
                     rule,
                     target.path,
-                    f"server '{server.name}' spawns a shell ('{server.command[0]}') — "
+                    f"server '{server.name}' spawns a shell ('{base}') — "
                     "it can execute arbitrary commands on this machine",
                     server=server.name,
                     line=_line_of(target.raw_text, server.name),
@@ -523,6 +658,75 @@ def hidden_unicode(rule: Rule, target: Any, ctx: ScanContext) -> list[Finding]:
             )
         )
     return findings
+
+
+_FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*(?:\n|$)", re.DOTALL)
+_TOOL_TOKEN_RE = re.compile(r"(?:[^\s,(]+\([^)]*\))|[^\s,]+")
+_UNRESTRICTED_TOOL_RE = re.compile(
+    r"^(?:\*|mcp__\*|mcp__\*__\*|bash(?:\(\s*\*?\s*:?\s*\*?\s*\))?)$", re.IGNORECASE
+)
+
+
+def _split_tools(value: str) -> list[str]:
+    """Split comma/space-delimited tool lists, keeping `Bash(scope *)` intact."""
+    tokens = (token.strip("[]'\"") for token in _TOOL_TOKEN_RE.findall(value))
+    return [token for token in tokens if token]
+
+
+def _strip_yaml_comment(value: str) -> str:
+    return re.split(r"(?:^|\s+)#", value, maxsplit=1)[0]
+
+
+def _allowed_tools(text: str) -> list[str]:
+    match = _FRONTMATTER_RE.match(text.lstrip("\ufeff"))
+    if not match:
+        return []
+    block = match.group(1)
+    value: Any = None
+    try:
+        data = yaml.safe_load(block)
+        if isinstance(data, dict):
+            value = data.get("allowed-tools")
+    except (yaml.YAMLError, ValueError, RecursionError):
+        # `allowed-tools: *` / `- *` / `[*, Read]` are not valid YAML aliases,
+        # and PyYAML raises bare ValueError for bad timestamps (and
+        # RecursionError for deep structures); recover the key line and any
+        # block-list items under it (indented or not).
+        line = re.search(r"(?m)^allowed-tools:[ \t]*(.*)$", block)
+        if line:
+            raw = [_strip_yaml_comment(line.group(1))]
+            for following in block[line.end() :].splitlines():
+                stripped = following.strip()
+                if not stripped:
+                    continue
+                if stripped.startswith("- "):
+                    raw.append(_strip_yaml_comment(stripped[2:]))
+                    continue
+                if not following[:1].isspace() and ":" in stripped:
+                    break
+            value = " ".join(raw)
+    if isinstance(value, str):
+        return _split_tools(value)
+    if isinstance(value, list):
+        return [token for item in value if isinstance(item, str) for token in _split_tools(item)]
+    return []
+
+
+@check("unrestricted_allowed_tools")
+def unrestricted_allowed_tools(rule: Rule, target: Any, ctx: ScanContext) -> list[Finding]:
+    if not isinstance(target, InstructionFile):
+        return []
+    hits = [item for item in _allowed_tools(target.text) if _UNRESTRICTED_TOOL_RE.match(item)]
+    return [
+        _finding(
+            rule,
+            target.path,
+            f"frontmatter pre-approves '{item}' without a permission prompt — scope it to "
+            "the exact commands this skill needs",
+            line=_line_of(target.text, item),
+        )
+        for item in hits[:5]
+    ]
 
 
 @check("server_name_shadowing")

@@ -10,7 +10,7 @@ from urllib.parse import quote
 from . import __version__
 from .lockfile import rel_to
 from .models import MCPConfigFile
-from .packages import package_specs
+from .packages import package_display, package_specs
 
 
 def build_aibom(configs: list[MCPConfigFile], root: Path) -> dict[str, Any]:
@@ -30,12 +30,16 @@ def build_aibom(configs: list[MCPConfigFile], root: Path) -> dict[str, Any]:
                 ],
             }
             if spec:
-                purl = f"pkg:{'npm' if spec.kind == 'npm' else 'pypi'}/{quote(spec.name, safe='/')}"
-                if spec.pinned and spec.version:
-                    component["version"] = spec.version
-                    purl += f"@{spec.version}"
-                component["purl"] = purl
-                component["properties"].append({"name": "mcplint:package", "value": spec.raw})
+                component["properties"].append(
+                    {"name": "mcplint:package", "value": package_display(spec)}
+                )
+                if spec.name:
+                    kind = "npm" if spec.kind == "npm" else "pypi"
+                    purl = f"pkg:{kind}/{quote(spec.name, safe='/')}"
+                    if spec.pinned and spec.version:
+                        component["version"] = spec.version
+                        purl += f"@{spec.version}"
+                    component["purl"] = purl
             components.append(component)
 
     return {

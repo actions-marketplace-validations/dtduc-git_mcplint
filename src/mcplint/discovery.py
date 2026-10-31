@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -55,6 +56,19 @@ HOME_CONFIGS: list[tuple[str, str]] = [
     ),
 ]
 
+# Claude Code plugin installs. Installed versions live under
+# cache/<marketplace>/<plugin>/<version>/; the cache also keeps orphaned copies
+# of replaced versions (.orphaned_at), so it is read through
+# installed_plugins.json and only walked when that manifest is unavailable.
+# synced/ holds claude.ai account plugins and local/ dev plugins; both are
+# walked directly. Marketplace clones under plugins/marketplaces/ are source
+# checkouts, not installs, and are skipped.
+PLUGIN_INSTALL_MANIFEST = "~/.claude/plugins/installed_plugins.json"
+HOME_PLUGIN_WALK_ROOTS: list[str] = [
+    "~/.claude/plugins/synced",
+    "~/.claude/plugins/local",
+]
+
 INSTRUCTION_FILES = [
     "AGENTS.md",
     "CLAUDE.md",
@@ -85,8 +99,16 @@ SKIP_DIRS = {
     ".ruff_cache",
 }
 
+# Installed plugins are published folders that may ship their own tests and
+# fixtures — deliberately vulnerable configs must not be reported as live
+# servers. Only the plugin's own top-level copies are skipped (a skill named
+# `docs` or a plugin named `tests` is still scanned).
+PLUGIN_SKIP_DIRS = {"tests", "test", "fixtures", "examples", "example", "docs"}
+
 MAX_CONFIG_FILES = 500
-MAX_INSTRUCTION_FILES = 200
+# Plugin installs contribute many SKILL.md files; user skill globs are walked
+# first so they keep priority when the cap is hit (truncation is silent today).
+MAX_INSTRUCTION_FILES = 500
 
 TEXT_SUFFIXES = {".md", ".mdc", ".txt"}
 
@@ -104,6 +126,31 @@ def _dedupe(paths: list[Path]) -> list[Path]:
     return out
 
 
+def _installed_plugin_paths() -> list[Path] | None:
+    """Active plugin install paths from installed_plugins.json.
+
+    None means the manifest could not be read (fall back to walking the cache);
+    an empty list means it was read and no plugin is installed.
+    """
+    manifest = Path(PLUGIN_INSTALL_MANIFEST).expanduser()
+    try:
+        data = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    plugins = data.get("plugins") if isinstance(data, dict) else None
+    if not isinstance(plugins, dict):
+        return None
+    paths: list[Path] = []
+    for entries in plugins.values():
+        for entry in entries if isinstance(entries, list) else [entries]:
+            raw = entry.get("installPath") if isinstance(entry, dict) else None
+            if isinstance(raw, str) and raw:
+                path = Path(raw).expanduser()
+                if path.is_absolute() and path.is_dir():
+                    paths.append(path)
+    return paths
+
+
 def _is_config_candidate(base: Path, name: str) -> bool:
     """Strict filename rules for configs found while walking a tree."""
     if name == ".mcp.json":
@@ -112,6 +159,8 @@ def _is_config_candidate(base: Path, name: str) -> bool:
         return True
     if name in ("opencode.json", "opencode.jsonc"):
         return True
+    if name == "plugin.json" and base.name == ".claude-plugin":
+        return True  # inline mcpServers in a Claude Code plugin manifest
     return name == "config.toml" and base.name == ".codex"
 
 
@@ -121,10 +170,24 @@ def _is_instruction_candidate(base: Path, name: str) -> bool:
     return name.endswith(".mdc") and base.name == "rules" and base.parent.name == ".cursor"
 
 
-def _walk_tree(root: Path, configs: list[Path], instructions: list[Path]) -> None:
+def _walk_tree(
+    root: Path,
+    configs: list[Path],
+    instructions: list[Path],
+    *,
+    skip_dirs: set[str] | None = None,
+    skip_dirs_root_only: bool = False,
+    skip_orphaned: bool = False,
+) -> None:
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
         base = Path(dirpath)
+        if skip_dirs and not (skip_dirs_root_only and base != root):
+            dirnames[:] = [d for d in dirnames if d not in skip_dirs]
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        if skip_orphaned and ".orphaned_at" in filenames:
+            # Replaced plugin version kept in the cache: not an active install.
+            dirnames[:] = []
+            continue
         for name in filenames:
             if len(configs) < MAX_CONFIG_FILES and _is_config_candidate(base, name):
                 configs.append(base / name)
@@ -176,5 +239,28 @@ def discover(
             base = Path(pattern.split("**")[0]).expanduser()
             if base.is_dir():
                 _walk_tree(base, [], instructions)
+        # Plugin content walks last so the user's own skills keep the
+        # instruction budget first.
+        install_paths = _installed_plugin_paths()
+        if install_paths is None:
+            # No manifest: installs are cache/<marketplace>/<plugin>/<version>.
+            cache = Path("~/.claude/plugins/cache").expanduser()
+            install_paths = sorted(p for p in cache.glob("*/*/*") if p.is_dir())
+            if not install_paths and cache.is_dir():
+                install_paths = [cache]  # unknown layout: walk as-is
+        for base in install_paths:
+            if base.is_dir():
+                _walk_tree(
+                    base,
+                    configs,
+                    instructions,
+                    skip_dirs=PLUGIN_SKIP_DIRS,
+                    skip_dirs_root_only=True,
+                    skip_orphaned=True,
+                )
+        for pattern in HOME_PLUGIN_WALK_ROOTS:
+            base = Path(pattern).expanduser()
+            if base.is_dir():
+                _walk_tree(base, configs, instructions, skip_orphaned=True)
 
     return _dedupe(configs), _dedupe(instructions)

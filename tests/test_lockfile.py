@@ -31,6 +31,28 @@ def test_lock_roundtrip_is_stable(tmp_path: Path) -> None:
     assert verify_lock(lock, configs, repo, _lock_rule()) == []
 
 
+def test_lock_does_not_store_url_package_secrets(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / ".mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "fetched": {
+                        "command": "npx",
+                        "args": ["https://dl.example.com/dl/sk-ak-SECRET/pkg.tgz"],
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    lock = build_lock(_configs(repo), repo)
+    text = json.dumps(lock)
+    assert "sk-ak-SECRET" not in text
+    assert "https://dl.example.com" in text
+
+
 def test_lock_detects_tampering(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     shutil.copytree(FIXTURES / "clean-repo", repo)

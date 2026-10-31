@@ -153,6 +153,8 @@ def build_report(
             servers_total += 1
             transport_counts[server.transport] += 1
             for spec in package_specs(server):
+                if not spec.name:
+                    continue
                 package_refs[spec.name] += 1
                 if spec.pinned:
                     package_pinned[spec.name] += 1

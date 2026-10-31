@@ -1,0 +1,17 @@
+{
+  "name": "mcplint",
+  "owner": {
+    "name": "Duke - Duc Dinh",
+    "email": "dtduc.contact@gmail.com"
+  },
+  "description": "mcplint — MCP config security tooling for Claude Code.",
+  "plugins": [
+    {
+      "name": "mcplint",
+      "source": "./claude-plugin",
+      "description": "Scan MCP client configs for OWASP MCP Top 10 risks with mcplint — offline, static, never executes MCP servers.",
+      "category": "security",
+      "tags": ["mcp", "security", "scanner", "owasp"]
+    }
+  ]
+}
